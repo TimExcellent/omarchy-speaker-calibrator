@@ -125,9 +125,13 @@ and everything is fitted above that.
 
 **Check the calibration** replays the sweeps through the installed filter and
 measures what actually comes out. It reports how closely the sound follows the
-plan and whether it sits closer to the target than the plain speakers did. The
-deep-bass add-on is muted during a check, because it invents harmonics no
-linear model predicts and would otherwise read as error.
+plan and whether it sits closer to the target than the plain speakers did. A
+check is always made with the microphone the calibration was made with, on the
+same channels: another microphone would measure the difference between two
+microphones, not between the speakers and the plan. If that microphone is not
+connected, the button says so and waits. The deep-bass add-on is muted during a
+check, because it invents harmonics no linear model predicts and would
+otherwise read as error.
 
 **Improve from the check** feeds that residual back in and fits again, using
 the same gates. It is level-neutral, so iterating never drifts the overall

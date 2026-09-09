@@ -116,6 +116,17 @@ Item {
   // A finished measurement changes the archive, so a comparison already on
   // screen is out of date the moment it lands.
   property bool _micsPending: false
+  // The status says when each microphone last measured.  Curves on screen
+  // that predate that are fetched again, whichever run changed the archive: a
+  // measurement, a reset, a restore.  Nothing is fetched until the panel has
+  // asked for the curves once.
+  property string _micsKey: ""
+  function _archiveKey(payload) {
+    var archive = (payload || {}).microphones || {}
+    return String((archive.internal || {}).created_at || "") + "|"
+      + String((archive.external || {}).created_at || "")
+  }
+  onStatusChanged: if (micComparison !== null && _archiveKey(status) !== _micsKey) loadMicrophones()
   function refresh() {
     if (busy) { _refreshPending = true; return }
     start("devices", ["devices-json"])
@@ -275,6 +286,9 @@ Item {
           return
         }
         if (root.phase === "mics") {
+          // Which archive these curves describe, so a status that says the
+          // same needs no second fetch.
+          root._micsKey = root._archiveKey(root.status)
           root.micComparison = JSON.parse(raw)
           root.message = ""
           root.phase = ""

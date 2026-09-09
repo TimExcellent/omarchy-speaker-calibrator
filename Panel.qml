@@ -156,6 +156,30 @@ Panel {
     if (record.verdict && record.verdict !== "pass") parts.push(record.verdict)
     return parts.join("  ·  ")
   }
+  // A check is only a check when it is made with the microphone the
+  // calibration was made with, on the same channels: another microphone
+  // measures the difference between microphones, not between the speakers
+  // and the plan.  The helper refuses anything else; this says so first.
+  function calibrationMicrophone() {
+    return ((service.status.profile || {}).microphone) || null
+  }
+  function calibrationMicrophoneConnected() {
+    var mic = calibrationMicrophone()
+    if (!mic) return false
+    for (var i = 0; i < service.microphones.length; i++)
+      if (service.microphones[i].name === mic.name) return true
+    return false
+  }
+  function checkDescription() {
+    var mic = calibrationMicrophone()
+    if (!mic) return "Measure again through the corrected output and compare it with the plan"
+    var kind = mic.internal ? "internal mic" : "external mic"
+    if (!calibrationMicrophoneConnected())
+      return "Needs the " + kind + " this calibration was made with ("
+        + String(mic.description || mic.name) + "), which is not connected"
+    return "Measure again with the " + kind + " this calibration was made with, "
+      + "through the corrected output, and compare it with the plan"
+  }
   function currentOutputName() {
     return service.status.defaultSinkDescription
       || service.status.defaultSink || "another output"
@@ -179,25 +203,25 @@ Panel {
           break
         }
       if (connected)
-        return "Only the built-in microphones have measured so far. " + connected
+        return "Only the internal mic has measured so far. " + connected
           + " is connected and ready: choose it under MICROPHONE, place it where you "
           + "listen, and calibrate. Both curves then appear here together."
-      return "Only the built-in microphones have measured so far, and no measuring "
-        + "microphone is connected. Plug a USB one in, middle-click the bar icon to "
-        + "pick it up, and calibrate with it placed where you listen."
+      return "Only the internal mic has measured so far, and no external mic is "
+        + "connected. Plug a USB one in, middle-click the bar icon to pick it up, "
+        + "and calibrate with it placed where you listen."
     }
     if (!haveInternal)
-      return "Only the measuring microphone has measured so far. Measure again with "
-        + "the built-in microphones and both curves appear here together."
+      return "Only the external mic has measured so far. Measure again with the "
+        + "internal mic and both curves appear here together."
     var worst = comparison.worst
     if (!worst) return "Both measurements are stored."
     var amount = Math.abs(Number(worst.difference_db)).toFixed(1)
     var direction = Number(worst.difference_db) > 0 ? "more" : "less"
-    return "The built-in microphones read " + amount + " dB " + direction + " "
-      + worst.band + " than the measuring microphone, and differ by "
+    return "The internal mic reads " + amount + " dB " + direction + " "
+      + worst.band + " than the external mic, and the two differ by "
       + Number(comparison.rms_difference_db).toFixed(1) + " dB overall. That gap is "
-      + "the microphone, not the speakers: the built-in ones sit inside the case, "
-      + "inches from one driver, while the measuring one sits where you listen."
+      + "the microphone, not the speakers: the internal mic sits inside the case, "
+      + "inches from one driver, while the external one sits where you listen."
   }
   // Draw both measured curves on one set of axes, shape only.
   function paintMicrophones(canvas, comparison) {
@@ -207,7 +231,27 @@ Panel {
     var padLeft = 34, padRight = 8, padTop = 8, padBottom = 20
     var plotWidth = canvas.width - padLeft - padRight
     var plotHeight = canvas.height - padTop - padBottom
-    var minFrequency = 80, maxFrequency = 16000, minDb = -18, maxDb = 12
+    var minFrequency = 80, maxFrequency = 16000
+    // The vertical range follows the curves.  A microphone inside the case
+    // and one at the listening spot can sit twenty decibels apart, and a
+    // fixed window cut both off flat against its edges, which reads as no
+    // graph at all.
+    var lowest = -12, highest = 12
+    var records = [comparison.internal, comparison.external]
+    for (var r = 0; r < records.length; r++) {
+      if (!records[r]) continue
+      var fs = records[r].frequency_hz || [], ys = records[r].response_db || []
+      var n = Math.min(fs.length, ys.length)
+      for (var k = 0; k < n; k++) {
+        var fq = Number(fs[k]), val = Number(ys[k])
+        if (fq < minFrequency || fq > maxFrequency || !isFinite(val)) continue
+        if (val < lowest) lowest = val
+        if (val > highest) highest = val
+      }
+    }
+    var step = highest - lowest > 36 ? 12 : 6
+    var minDb = Math.max(-48, Math.floor(lowest / step) * step)
+    var maxDb = Math.min(36, Math.ceil(highest / step) * step)
     function xFor(frequency) {
       return padLeft + (Math.log(frequency / minFrequency)
         / Math.log(maxFrequency / minFrequency)) * plotWidth
@@ -230,7 +274,7 @@ Panel {
       context.fillText(decades[d] >= 1000 ? (decades[d] / 1000) + "k" : String(decades[d]),
                        gx - 8, canvas.height - 6)
     }
-    for (var level = minDb; level <= maxDb; level += 6) {
+    for (var level = minDb; level <= maxDb; level += step) {
       var gy = yFor(level)
       context.globalAlpha = level === 0 ? 0.5 : 0.2
       context.beginPath(); context.moveTo(padLeft, gy)
@@ -383,6 +427,10 @@ Panel {
     if (!service.proposal || !service.proposal.quality) return []
     var m = service.proposal.quality.metrics || {}
     var rows = []
+    var mic = service.proposal.microphone
+    if (mic)
+      rows.push({ key: "Microphone", value: (mic.internal ? "internal mic" : "external mic")
+        + "  ·  " + String(mic.description || "") })
     var level = (service.proposal.measurement || {}).level_search
     if (level && level.selected_level_dbfs !== undefined) {
       var probes = (level.attempts || []).length
@@ -822,7 +870,11 @@ Panel {
         root._optionsAdopted = true
       }
       eqCanvas.requestPaint()
+      microphoneCanvas.requestPaint()
     }
+    // New curves land in a canvas that is already showing, and a canvas in a
+    // window that was closed and opened again comes back empty: paint on both.
+    function onMicComparisonChanged() { microphoneCanvas.requestPaint() }
     function onSinksChanged() { root.selectInternalDevices() }
     function onMicrophonesChanged() { root.selectInternalDevices(); channelBox.currentIndex = 0 }
     function onProposalChanged() { responseCanvas.requestPaint() }
@@ -1429,14 +1481,14 @@ Panel {
                 visible: microphoneCanvas.visible
                 Text {
                   textFormat: Text.PlainText
-                  text: "—  built-in"
+                  text: "—  internal mic"
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
                 Text {
                   textFormat: Text.PlainText
-                  text: "—  measuring microphone"
+                  text: "—  external mic"
                   color: bar && bar.accent ? bar.accent : Color.accent
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -1464,7 +1516,7 @@ Panel {
                     key: modelData.band
                     value: (Number(modelData.difference_db) > 0 ? "+" : "")
                       + Number(modelData.difference_db).toFixed(1)
-                      + " dB on the built-in microphones"
+                      + " dB on the internal mic"
                   }
                 }
               }
@@ -1514,8 +1566,8 @@ Panel {
                 width: parent.width
                 icon: "󰄾"
                 label: service.busy && service.phase === "verify" ? "Checking…" : "Check the calibration"
-                description: "Measure again through the corrected output and compare it with the plan"
-                enabled: !service.busy
+                description: root.checkDescription()
+                enabled: !service.busy && root.calibrationMicrophoneConnected()
                 onClicked: service.verify()
               }
               ActionRow {

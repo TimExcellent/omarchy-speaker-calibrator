@@ -4,6 +4,7 @@ import subprocess
 import sys
 import unittest
 import importlib.util
+import inspect
 import tempfile
 import json
 from pathlib import Path
@@ -491,7 +492,7 @@ class CompareToggleTests(unittest.TestCase):
                 "plugin_version": "0.8.0",
             }))
             summary = speaker_calibrate.profile_summary(path)
-            self.assertEqual(summary["label"], "2026-09-08 20:00 · 4 filters · flat · normal bass · protected")
+            self.assertEqual(summary["label"], "2026-09-08 20:00 · external mic · 4 filters · flat · normal bass · protected")
             self.assertEqual(summary["plugin_version"], "0.8.0")
             self.assertIsNone(speaker_calibrate.profile_summary(Path(folder) / "missing.json"))
 
@@ -1592,6 +1593,41 @@ class BoostBudgetTests(unittest.TestCase):
         self.assertEqual(
             float(weight), EXCURSION_WEIGHT_CEILING
         )
+
+
+class CheckAndProfileLabelTests(unittest.TestCase):
+    helper = Path(__file__).resolve().parents[1] / "speaker-calibrate.py"
+
+    def test_the_check_cannot_be_asked_to_use_another_microphone(self):
+        # The check measures with the microphone the calibration was made
+        # with, on its channels.  Neither the function nor the command line
+        # takes anything that could point it elsewhere.
+        self.assertEqual(
+            list(inspect.signature(speaker_calibrate.verify_calibration).parameters), []
+        )
+        result = subprocess.run(
+            [sys.executable, "-s", str(self.helper), "verify-json", "--channel", "0"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unrecognized arguments: --channel", result.stderr)
+
+    def test_a_profile_label_names_the_microphone_that_made_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for internal, word in ((True, "internal mic"), (False, "external mic")):
+                path = Path(folder) / f"{word[:8]}.json"
+                path.write_text(json.dumps({
+                    "created_at": "2026-09-09T20:46:00+00:00",
+                    "microphone": {"name": "alsa_input.x", "internal": internal},
+                    "fit": {"filter_count": 5},
+                    "voicing": "neutral", "bass": "full", "loudness": "matched",
+                }))
+                summary = speaker_calibrate.profile_summary(path)
+                self.assertEqual(summary["microphone_kind"], word.split()[0])
+                self.assertTrue(
+                    summary["label"].startswith(f"2026-09-09 20:46 · {word} · 5 filters"),
+                    summary["label"],
+                )
 
 
 if __name__ == "__main__":

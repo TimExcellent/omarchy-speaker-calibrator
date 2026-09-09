@@ -1073,9 +1073,14 @@ def profile_summary(path):
         return None
     fit = profile.get("fit") or {}
     created = str(profile.get("created_at", ""))[:16].replace("T", " ")
+    # The microphone comes right after the date: with one profile per kind of
+    # microphone, that is the word that tells the two apart.
+    kind = microphone_kind(profile)
     return {
         "created_at": profile.get("created_at"),
-        "label": f"{created} · {fit.get('filter_count', 0)} filters · "
+        "microphone_kind": kind,
+        "label": f"{created} · {MICROPHONE_KIND_LABELS[kind]} · "
+                 f"{fit.get('filter_count', 0)} filters · "
                  f"{VOICING_LABELS.get(profile.get('voicing'), 'neutral')} · "
                  f"{BASS_LABELS.get(profile.get('bass'), 'normal bass')} · "
                  f"{LOUDNESS_LABELS.get(profile.get('loudness'), 'protected')}",
@@ -1592,6 +1597,7 @@ def attach_level_search(measurement, level_search):
 VOICING_LABELS = {"neutral": "flat", "warm": "warm"}
 LOUDNESS_LABELS = {"protected": "protected", "balanced": "balanced", "matched": "matched"}
 BASS_LABELS = {"normal": "normal bass", "full": "full bass"}
+MICROPHONE_KIND_LABELS = {"internal": "internal mic", "external": "external mic"}
 
 
 def profile_from_measurement(
@@ -2042,8 +2048,14 @@ def refine_from_check():
     )
 
 
-def verify_calibration(channel_override=None):
-    """Measure through the corrected output and compare it with the fit."""
+def verify_calibration():
+    """Measure through the corrected output and compare it with the fit.
+
+    Always with the microphone the calibration was made with, on the same
+    channels and through the same correction file.  A check with another
+    microphone measures the difference between two microphones, not between
+    the speakers and the plan, so there is no way to ask for one.
+    """
     load_dsp()
     profile = load_profile(PROFILE)
     if profile is None:
@@ -2061,11 +2073,10 @@ def verify_calibration(channel_override=None):
     mic = profile["microphone"]
     if not any(item["name"] == mic["name"] for item in microphones()):
         raise SystemExit(
-            f"The microphone used for this calibration ({label(mic)}) is not connected."
+            "The check needs the microphone this calibration was made with "
+            f"({label(mic)}), and it is not connected."
         )
-    channel = parse_channel_selection(
-        channel_override if channel_override is not None else mic.get("channel", 0)
-    )
+    channel = parse_channel_selection(mic.get("channel", 0))
     calibration_file = mic.get("calibration_file")
     # The one measurement that is deliberately made through the correction,
     # but never through the add-on that invents frequencies.
@@ -2350,8 +2361,7 @@ def main():
     for name in ("deep-bass-toggle", "install-bass-enhancer",
                  "install-measurement-support", "loudness-toggle"):
         sub.add_parser(name)
-    verify = sub.add_parser("verify-json")
-    verify.add_argument("--channel")
+    sub.add_parser("verify-json")
     refine = sub.add_parser("refine-json")
     refine.add_argument("--install", action="store_true",
                         help="install and play the improved profile")
@@ -2405,7 +2415,7 @@ def main():
     elif command == "bypass-toggle":
         print(json.dumps(bypass_toggle()))
     elif command == "verify-json":
-        print(json.dumps(verify_calibration(args.channel)))
+        print(json.dumps(verify_calibration()))
     elif command == "deep-bass-toggle":
         print(json.dumps(deep_bass_toggle()))
     elif command == "loudness-toggle":

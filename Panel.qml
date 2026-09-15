@@ -128,17 +128,21 @@ Panel {
       ? "On. Low notes are suggested by their harmonics, which these speakers can play."
       : "Off. Press to hear low notes suggested by their harmonics."
   }
-  // Shown before anything is installed, and only when the package would come
-  // from the AUR rather than a curated repository.
+  // Shown before anything is installed, and only when the package would be
+  // built from source rather than installed from a curated repository.
   function bassWarningText() {
     var addon = service.status.bassEnhancer || {}
     if (addon.usable === true) return ""
-    if (addon.source && addon.source !== "AUR") return ""
-    var name = addon.package || "bankstown"
-    return "This add-on is not one of Omarchy's own packages. It comes from the AUR, "
-      + "where anyone can publish, and it is built from source on your machine. "
-      + "Nobody has checked it for you. You can read it first at "
-      + "aur.archlinux.org/packages/" + name + "."
+    if (addon.source && addon.source !== "pinned-source") return ""
+    var pin = addon.pin || {}
+    return "This add-on is not one of Omarchy's own packages. It is built from source "
+      + "on your machine, from one fixed upstream release that this plugin names by "
+      + "its exact commit (bankstown " + String(pin.version || "") + ", "
+      + String(pin.commit || "").slice(0, 12) + ") and checks before building; "
+      + "nothing is taken from the AUR. Building needs the Rust toolchain from "
+      + "Omarchy's own repositories, installed if it is missing, and pacman asks for "
+      + "your password in a terminal window. You can read the source first at "
+      + "github.com/chadmed/bankstown."
   }
   // "Recalibrate" says nothing about which microphone did the one in use.
   // Each row now carries its own history: whether it has measured at all,
@@ -1979,8 +1983,10 @@ Panel {
                 value: ((service.status.bassEnhancer || {}).usable === true)
                   ? "bankstown add-on installed at " + String((service.status.bassEnhancer || {}).path)
                     + "; makes harmonics from below the high-pass corner and keeps them above it"
-                  : "optional bankstown add-on, not installed; would come from "
-                    + String((service.status.bassEnhancer || {}).source || "AUR")
+                  : "optional bankstown add-on, not installed; "
+                    + (((service.status.bassEnhancer || {}).source || "pinned-source") !== "pinned-source"
+                        ? "would come from the " + String((service.status.bassEnhancer || {}).source) + " repository"
+                        : "would be built from its pinned upstream commit")
                     + "; nothing in the chain depends on it"
               }
             }

@@ -3,6 +3,7 @@
 import subprocess
 import sys
 import unittest
+from unittest import mock
 import importlib.util
 import inspect
 import tempfile
@@ -1048,9 +1049,10 @@ class BassEnhancerTests(unittest.TestCase):
         self.assertEqual(command, "omarchy pkg add bankstown")
         self.assertEqual(repository, "extra")
 
-    def test_it_falls_back_to_the_aur_when_no_repository_has_it(self):
+    def test_it_falls_back_to_the_pinned_build_when_no_repository_has_it(self):
         command, repository = self.install_command_with("", returncode=1)
-        self.assertEqual(command, "omarchy pkg aur add bankstown")
+        self.assertEqual(command.split()[0], "/usr/bin/bash")
+        self.assertTrue(command.endswith("/bass-enhancer/install.sh"), command)
         self.assertIsNone(repository)
 
     def test_bypassing_the_calibration_matches_the_running_shape(self):
@@ -1628,6 +1630,42 @@ class CheckAndProfileLabelTests(unittest.TestCase):
                     summary["label"].startswith(f"2026-09-09 20:46 · {word} · 5 filters"),
                     summary["label"],
                 )
+
+
+class PinnedBassEnhancerTests(unittest.TestCase):
+    root = Path(__file__).resolve().parents[1]
+
+    def test_the_pkgbuild_and_script_name_the_helper_s_revision(self):
+        pkgbuild = (self.root / "bass-enhancer" / "PKGBUILD").read_text()
+        script = (self.root / "bass-enhancer" / "install.sh").read_text()
+        commit = speaker_calibrate.BASS_ENHANCER_COMMIT
+        tree = speaker_calibrate.BASS_ENHANCER_TREE
+        version = speaker_calibrate.BASS_ENHANCER_VERSION
+        self.assertRegex(commit, r"^[0-9a-f]{40}$")
+        self.assertRegex(tree, r"^[0-9a-f]{40}$")
+        self.assertIn(f"_commit={commit}\n", pkgbuild)
+        self.assertIn("#commit=${_commit}", pkgbuild)
+        self.assertIn(f"pkgver={version}\n", pkgbuild)
+        self.assertRegex(pkgbuild, r"sha256sums=\('[0-9a-f]{64}'\)")
+        self.assertNotIn("SKIP", pkgbuild)
+        self.assertIn(f"COMMIT={commit}\n", script)
+        self.assertIn(f"TREE={tree}\n", script)
+        self.assertIn(f"VERSION={version}\n", script)
+
+    def test_nothing_that_runs_asks_the_aur_or_skips_confirmation(self):
+        for name in ("speaker-calibrate.py", "Panel.qml", "Service.qml",
+                     "bass-enhancer/install.sh", "bass-enhancer/PKGBUILD"):
+            text = (self.root / name).read_text()
+            for phrase in ("pkg aur", "--noconfirm", "yay", "aur.archlinux.org"):
+                self.assertNotIn(phrase, text, f"{phrase!r} in {name}")
+
+    def test_without_a_repository_the_shipped_script_is_the_install_command(self):
+        with mock.patch.object(speaker_calibrate, "package_repository", return_value=None):
+            command, repository = speaker_calibrate.bass_enhancer_install_command()
+        self.assertIsNone(repository)
+        self.assertEqual(command.split()[0], "/usr/bin/bash")
+        self.assertTrue(command.endswith("/bass-enhancer/install.sh"), command)
+        self.assertTrue((self.root / "bass-enhancer" / "install.sh").exists())
 
 
 if __name__ == "__main__":

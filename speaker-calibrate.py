@@ -7,6 +7,7 @@ import datetime as dt
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -322,18 +323,24 @@ def package_repository(package):
     return "unknown"
 
 
+def bass_enhancer_build_script():
+    """The build script shipped next to this file, with its pinned PKGBUILD."""
+    return Path(__file__).resolve().parent / BASS_ENHANCER_BUILD_DIR / "install.sh"
+
+
 def bass_enhancer_install_command():
     """How to install the add-on: a plain package when a repository has it.
 
     Omarchy's own repository may carry it one day, and a signed repository
     package is preferable to a source build, so the repository is asked first
-    and the answer decides the command.  Nothing here needs changing if it
-    later appears there.
+    and the answer decides the command.  Otherwise it is built from one fixed
+    upstream revision by the PKGBUILD this plugin ships.  The AUR is never
+    consulted, so what gets built is what was reviewed with the plugin.
     """
     repository = package_repository(BASS_ENHANCER_PACKAGE)
     if repository:
         return f"omarchy pkg add {BASS_ENHANCER_PACKAGE}", repository
-    return f"omarchy pkg aur add {BASS_ENHANCER_PACKAGE}", None
+    return shlex.join(["/usr/bin/bash", str(bass_enhancer_build_script())]), None
 
 
 LOUDNESS_UNIT_TEXT = """[Unit]
@@ -469,7 +476,11 @@ def bass_enhancer_state():
     status = bass_enhancer_status()
     if status["installed"]:
         return status
-    return {**status, "source": package_repository(BASS_ENHANCER_PACKAGE) or "AUR"}
+    return {
+        **status,
+        "source": package_repository(BASS_ENHANCER_PACKAGE) or "pinned-source",
+        "pin": {"version": BASS_ENHANCER_VERSION, "commit": BASS_ENHANCER_COMMIT},
+    }
 
 
 def install_bass_enhancer():
@@ -492,14 +503,15 @@ def install_bass_enhancer():
         **status,
         "started": True,
         "command": command,
-        "source": repository or "AUR",
+        "source": repository or "pinned-source",
+        "pin": {"version": BASS_ENHANCER_VERSION, "commit": BASS_ENHANCER_COMMIT},
         "message": (
             f"Installing from the {repository} repository in a terminal window. "
             "When it finishes, switch Deep bass on again."
             if repository else
-            "Installing from the AUR, which is not curated by Omarchy and builds from "
-            "source, in a terminal window. Read what it does before agreeing. When it "
-            "finishes, switch Deep bass on again."
+            f"Building bankstown {BASS_ENHANCER_VERSION} from its pinned upstream "
+            "commit in a terminal window; pacman asks for your password there. "
+            "When it finishes, switch Deep bass on again."
         ),
     }
 
@@ -638,6 +650,14 @@ def select(items, title, predicate=None):
 # so the plugin works without it and only ever asks.
 BASS_ENHANCER_URI = "https://chadmed.au/bankstown"
 BASS_ENHANCER_PACKAGE = "bankstown"
+# The one upstream revision the add-on is built from when no repository
+# carries it: release 1.1.0, named by the full hash of its commit and of its
+# tree.  The PKGBUILD and the build script under BASS_ENHANCER_BUILD_DIR name
+# the same revision, and a test keeps the three in step.
+BASS_ENHANCER_VERSION = "1.1.0"
+BASS_ENHANCER_COMMIT = "e9829c9bccf5ed73768135c0ddd506f5a6690f9e"
+BASS_ENHANCER_TREE = "a8bbbb026af98053656283aed1801be3032c0876"
+BASS_ENHANCER_BUILD_DIR = "bass-enhancer"
 BASS_ENHANCER_SEARCH_PATHS = (
     "/usr/lib/lv2", "/usr/local/lib/lv2", str(Path.home() / ".lv2"),
 )

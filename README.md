@@ -80,6 +80,11 @@ finished package is installed by `pacman`, which asks for your password in the
 terminal window that opens. Should Omarchy's repositories ever carry
 `bankstown` themselves, the plugin installs that signed package instead.
 
+`bankstown` is written by James Calligeros and released under the MIT
+licence, which is installed alongside it. The plugin's PKGBUILD follows the
+AUR package by Sagar Patil, with its movable tag replaced by the exact commit;
+the archive checksum is the one that package publishes.
+
 Leave it alone and the calibration is complete and unaffected.
 
 ### Why it works

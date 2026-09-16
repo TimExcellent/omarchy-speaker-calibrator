@@ -280,13 +280,16 @@ through the chain (pink noise unless you pass a track:
 `speaker-calibrate.py vendor-tuning-json --reference song.flac`). Listen on the
 hardware, fill in `validated_by`, and offer it as a pull request to Omarchy.
 
-**Hear it as Omarchy would install it** plays that tuning the way a user of
-Omarchy would get it: the plugin stops its own calibration, stages a private
-copy of the Omarchy tree with the rendered tuning added, and runs Omarchy's own
-`omarchy audio tuning on` against it, with Omarchy's matching and verification
-and without root. What plays is the plain chain, no deep bass, no loudness
-compensation, no volume following. **Back to the calibration** runs `omarchy
-audio tuning off` and puts the calibration back.
+**Hear the exported tuning** plays it beside the calibration: the rendered
+chain starts as a second output, your music is moved onto it, and a PipeWire
+stream survives that move without a break, so nothing stops and nothing
+restarts. What plays is the plain chain with its built-in deep bass, no
+loudness compensation, no volume following. **Back to the calibration** moves
+the music back and drops the second output. The faithful check of the files,
+through Omarchy's own installer with its matching and verification, is
+`speaker-calibrate.py vendor-try-json --installer`; that one restarts the
+tuning host, so playback pauses for a second, and `vendor-restore-json` puts
+the calibration back.
 
 Every value a shared file could feed into the filter chain is checked against
 the same limits the optimizer works under before anything is loaded: no cut

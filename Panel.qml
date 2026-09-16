@@ -367,8 +367,11 @@ Panel {
   function heroMeta() {
     if (service.working) return service.message
     if (service.status.vendorTrial === true)
-      return "Playing the exported Omarchy tuning through Omarchy's own installer: the plain "
-        + "chain, no add-ons. The calibration is stopped; Back to the calibration returns it."
+      return service.status.graph === "vendor-trial"
+        ? "Playing the exported Omarchy tuning through Omarchy's own installer; the calibration "
+          + "is stopped. Back to the calibration returns it."
+        : "Your music plays through the exported tuning, beside the calibration: the plain "
+          + "chain with its built-in deep bass, no compensation. Back to the calibration moves it back."
     if (!service.status.enabled) {
       // The commonest reason is the simplest: the sound went somewhere else.
       if (service.status.profile && service.status.service === "active")
@@ -1006,7 +1009,7 @@ Panel {
             width: parent.width
             icon: "󰓦"
             label: service.busy && service.phase === "vendorrestore" ? "Coming back…" : "Back to the calibration"
-            description: "Takes Omarchy's tuning off again and plays the calibration, with its add-ons"
+            description: "Moves the music back to the calibration, with its compensation; nothing restarts"
             enabled: !service.busy
             onClicked: service.vendorRestore()
           }
@@ -1640,14 +1643,14 @@ Panel {
                     && service.status.vendorExport !== null)
               width: parent.width
               icon: "󰓦"
-              label: service.busy && service.phase === "vendortry" ? "Installing…"
+              label: service.busy && service.phase === "vendortry" ? "Starting…"
                 : service.busy && service.phase === "vendorrestore" ? "Coming back…"
                 : service.status.vendorTrial === true ? "Back to the calibration"
-                : "Hear it as Omarchy would install it"
+                : "Hear the exported tuning"
               description: service.status.vendorTrial === true
-                ? "Omarchy's installer put the exported tuning on and the calibration is stopped; this returns it"
-                : "Renders the tuning again, stops the calibration, and installs it through Omarchy's own "
-                  + "omarchy audio tuning on: the plain chain, no add-ons, exactly what a user of the tuning gets"
+                ? "The exported tuning is playing beside the calibration; this moves the music back"
+                : "Renders the tuning again, starts it as a second output beside the calibration and moves "
+                  + "your music onto it without a break: the plain chain with its built-in deep bass, no compensation"
               enabled: !service.busy
               onClicked: service.status.vendorTrial === true ? service.vendorRestore() : service.vendorTry()
             }

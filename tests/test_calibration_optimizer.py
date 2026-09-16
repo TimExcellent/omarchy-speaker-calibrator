@@ -2035,6 +2035,19 @@ class VendorTrialTests(unittest.TestCase):
         fragment.write_text("# x speaker tuning.\n# Fitted by the Omarchy Speaker Calibrator\n")
         self.assertTrue(speaker_calibrate.vendor_trial_active())
 
+    def test_a_trial_beside_the_calibration_gets_its_own_names_and_the_real_target(self):
+        chain = ('capture.props = { node.name = "omarchy_speaker_tuning" }\n'
+                 'playback.props = { node.name = "omarchy_speaker_tuning_output" target.object = "@SPEAKER_SINK@" }\n'
+                 'node.description = "Laptop Speakers"\n')
+        graph = speaker_calibrate.trial_graph(chain, "alsa_output.pci-test.analog-stereo")
+        self.assertIn('node.name = "omarchy_speaker_trial" ', graph)
+        self.assertIn('node.name = "omarchy_speaker_trial_output"', graph)
+        self.assertIn('target.object = "alsa_output.pci-test.analog-stereo"', graph)
+        self.assertNotIn("omarchy_speaker_tuning", graph)
+        self.assertNotIn("@SPEAKER_SINK@", graph)
+        self.assertIn("omarchy-speaker-trial.conf", speaker_calibrate.TRIAL_UNIT_TEXT)
+        self.assertNotIn("omarchy-speaker-tuning.conf", speaker_calibrate.TRIAL_UNIT_TEXT)
+
     def test_the_overlay_links_omarchy_and_holds_only_the_rendered_tuning(self):
         rendered = {"slug": "slimbook-executive", "tuning": 'description="x"\n', "chain": "context.modules = []\n"}
         overlay = speaker_calibrate.build_vendor_overlay(rendered)

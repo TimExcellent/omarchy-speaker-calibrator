@@ -1598,6 +1598,9 @@ def rbj_coefficients(kind, frequency_hz, q, gain_db, rate_hz):
     if kind == "highpass":
         b = ((1.0 + cos_w) / 2.0, -(1.0 + cos_w), (1.0 + cos_w) / 2.0)
         a = (1.0 + alpha, -2.0 * cos_w, 1.0 - alpha)
+    elif kind == "lowpass":
+        b = ((1.0 - cos_w) / 2.0, 1.0 - cos_w, (1.0 - cos_w) / 2.0)
+        a = (1.0 + alpha, -2.0 * cos_w, 1.0 - alpha)
     elif kind == "peaking":
         b = (1.0 + alpha * amp, -2.0 * cos_w, 1.0 - alpha * amp)
         a = (1.0 + alpha / amp, -2.0 * cos_w, 1.0 - alpha / amp)

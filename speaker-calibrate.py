@@ -2718,11 +2718,69 @@ def _plain(value):
     return f"{round(float(value), 3):g}"
 
 
-def vendor_chain(sections, trim_db, input_gain, header):
+# The bass add-on's saturator scales tanh by this; blend 1.0 leaves only the
+# odd-symmetric branch, which is how this plugin runs it.
+BANKSTOWN_SCALE = math.pi / (0.5 + math.e)
+NATURAL_BASE = math.e
+
+
+def vendor_harmonics(profile):
+    """Deep bass for a chain without the add-on: bankstown's own recipe.
+
+    The add-on takes what lies below the knee, saturates it, keeps the
+    harmonics between the knee and three times the knee, and adds them back
+    ahead of the EQ.  Every step is a filter, a tanh and a sum, and a tanh is
+    exp, log and a few linear stages, so the whole of it is expressible in
+    PipeWire's built-in nodes and Omarchy can ship it without the add-on.
+    Only when the profile has deep bass on; the numbers are the plugin's.
+    """
+    if profile.get("deep_bass") != "on" or BASS_ENHANCER_BLEND < 1.0:
+        return None
+    corner = highpass_settings(profile["fit"])[0]
+    controls = bass_enhancer_controls(corner, True)
+    return {
+        "floor_hz": controls["bass:floor"], "ceil_hz": controls["bass:ceil"],
+        "final_hp_hz": controls["bass:final_hp"], "drive": BASS_ENHANCER_THIRD,
+        "amount": BASS_ENHANCER_AMOUNT, "scale": BANKSTOWN_SCALE,
+    }
+
+
+def vendor_chain(sections, trim_db, input_gain, header, harmonics=None):
     """filter-chain.conf in the layout Omarchy ships."""
     nodes, links, inputs = [], [], []
     for side in ("l", "r"):
         names = []
+        if harmonics:
+            # bankstown in built-ins: band-limit, k·amt·tanh(drive·x) as
+            # 1 - 2/(e^(2u)+1) with the division done as exp(-log), then the
+            # harmonics' own band, summed with the untouched signal.
+            h = harmonics
+            gain, offset = -2.0 * h["scale"] * h["amount"], h["scale"] * h["amount"]
+            for name, label, control in (
+                ("hb_in", "copy", None),
+                ("hb_cl", "clamp", '"Min" = -10 "Max" = 10'),
+                ("hb_hp", "bq_highpass", f'"Freq" = {_plain(h["floor_hz"])} "Q" = 0.707'),
+                ("hb_lp", "bq_lowpass", f'"Freq" = {_plain(h["ceil_hz"])} "Q" = 0.707'),
+                ("hb_g", "linear", f'"Mult" = {_plain(2.0 * h["drive"])} "Add" = 0'),
+                ("hb_e1", "exp", f'"Base" = {NATURAL_BASE:.9f}'),
+                ("hb_p1", "linear", '"Mult" = 1 "Add" = 1'),
+                ("hb_ln", "log", f'"Base" = {NATURAL_BASE:.9f} "M1" = 1 "M2" = 1'),
+                ("hb_ng", "linear", '"Mult" = -1 "Add" = 0'),
+                ("hb_e2", "exp", f'"Base" = {NATURAL_BASE:.9f}'),
+                ("hb_out", "linear", f'"Mult" = {gain:.6f} "Add" = {offset:.6f}'),
+                ("hb_fh", "bq_highpass", f'"Freq" = {_plain(h["final_hp_hz"])} "Q" = 0.707'),
+                ("hb_fl", "bq_lowpass", f'"Freq" = {_plain(3.0 * h["ceil_hz"])} "Q" = 0.707'),
+                ("hb_mix", "mixer", '"Gain 1" = 1 "Gain 2" = 1'),
+            ):
+                full = f"{name}_{side}"
+                nodes.append(f'{{ type = builtin name = {full:<8} label = {label:<12}'
+                             + (f' control = {{ {control} }}' if control else "") + " }")
+            path = ["hb_in", "hb_cl", "hb_hp", "hb_lp", "hb_g", "hb_e1", "hb_p1", "hb_ln", "hb_ng", "hb_e2", "hb_out", "hb_fh", "hb_fl"]
+            for before, after in zip(path, path[1:]):
+                links.append(f'{{ output = "{before}_{side}:Out" input = "{after}_{side}:In" }}')
+            links.append(f'{{ output = "hb_cl_{side}:Out" input = "hb_mix_{side}:In 1" }}')
+            links.append(f'{{ output = "hb_fl_{side}:Out" input = "hb_mix_{side}:In 2" }}')
+            names.append(f"hb_mix_{side}")
         for index, (kind, frequency, q, gain) in enumerate(sections):
             name = f"s{index}_{side}"
             control = f'"Freq" = {_plain(frequency)} "Q" = {_plain(q)}'
@@ -2739,7 +2797,7 @@ def vendor_chain(sections, trim_db, input_gain, header):
         for before, after in zip(names, names[1:]):
             links.append(f'{{ output = "{before}:Out" input = "{after}:In" }}')
         links.append(f'{{ output = "{names[-1]}:Out" input = "limiter:in_{side}" }}')
-        inputs.append(f'"{names[0]}:In"')
+        inputs.append(f'"hb_in_{side}:In"' if harmonics else f'"{names[0]}:In"')
     nodes.append(f'''{{ type   = lv2
             name   = limiter
             plugin = "http://lsp-plug.in/plugins/lv2/limiter_stereo"
@@ -2844,13 +2902,24 @@ def ebur128_lra(signal, rate):
     return float(match.group(1)) if match else None
 
 
-def vendor_metrics(sections, input_gain, rate, reference=None):
+def vendor_metrics(sections, input_gain, rate, reference=None, harmonics=None):
     """The four figures Omarchy asks a tuning to report, less the fit's own."""
     load_dsp()
     from calibration_optimizer import group_delay_swing_ms, chain_sos
     import scipy.signal
     swing = group_delay_swing_ms(sections, rate)
     signal, label = vendor_test_signal(reference, rate)
+    if harmonics:
+        # The same recipe the chain carries, sample for sample.
+        h = harmonics
+        band = chain_sos([("highpass", h["floor_hz"], 0.707, 0.0), ("lowpass", h["ceil_hz"], 0.707, 0.0)], rate)
+        after = chain_sos([("highpass", h["final_hp_hz"], 0.707, 0.0), ("lowpass", 3.0 * h["ceil_hz"], 0.707, 0.0)], rate)
+        clipped = np.clip(signal, -10.0, 10.0)
+        added = np.stack([
+            scipy.signal.sosfilt(after, h["scale"] * h["amount"] * np.tanh(
+                h["drive"] * scipy.signal.sosfilt(band, clipped[:, channel])))
+            for channel in range(2)], axis=1)
+        signal = clipped + added
     sos = chain_sos(sections, rate)
     if sos.size:
         processed = np.stack([scipy.signal.sosfilt(sos, signal[:, channel]) for channel in range(2)], axis=1)
@@ -2880,7 +2949,8 @@ def render_vendor_tuning(reference=None):
     trim = fit.get("channel_trim") or {}
     trim_db = {"l": float(trim.get("left_db", 0.0)), "r": float(trim.get("right_db", 0.0))}
     input_gain = float(fit.get("input_gain_linear", 1.0))
-    metrics = vendor_metrics(sections, input_gain, VENDOR_RATE_HZ, reference)
+    harmonics = vendor_harmonics(profile)
+    metrics = vendor_metrics(sections, input_gain, VENDOR_RATE_HZ, reference, harmonics)
     mic = profile.get("microphone") or {}
     kind = "the built-in microphones" if mic.get("internal") else "an external measuring microphone at the listening position"
     when = str(profile.get("created_at", ""))[:10]
@@ -2905,7 +2975,16 @@ def render_vendor_tuning(reference=None):
 # Channels are wired explicitly because the limiter is a stereo plugin; a mono
 # graph is duplicated per channel and would limit each side independently,
 # shifting the stereo image on bass transients.'''
-    chain = vendor_chain(sections, trim_db, input_gain, header)
+    if harmonics:
+        header += f'''
+#
+# The hb_* nodes ahead of the EQ are deep bass: what lies below the knee
+# ({harmonics["ceil_hz"]:.0f} Hz), which these drivers cannot play, is saturated
+# ({harmonics["scale"]:.3f} * {harmonics["amount"]} * tanh({harmonics["drive"]} * x), the tanh written as
+# 1 - 2/(e^2u + 1) with exp and log) and its harmonics between the knee and
+# three times the knee are added back, so the ear hears the note the speaker
+# never made. It is the bankstown add-on's own recipe, in built-in nodes.'''
+    chain = vendor_chain(sections, trim_db, input_gain, header, harmonics)
     match_line = (f'match_sku=("{sku}")' if sku
                   else f'match_dmi=("{hardware.get("product_name", "")}")   ## no DMI SKU on this machine; substring of the product name')
     lra = metrics["dynamic_range_delta_lu"]
@@ -2917,6 +2996,7 @@ def render_vendor_tuning(reference=None):
 ## following the plugin can add are deliberately not part of this tuning.
 
 description="{label} speakers"
+{'## Deep bass is included: harmonics of the bass below the knee, made from built-in nodes.' if harmonics else '## No deep bass: the calibration was exported with that switch off.'}
 ## Matched on the DMI product SKU, compared as a whole value.
 {match_line}
 ## The internal speaker sink, as PipeWire names it on this machine.  Plain

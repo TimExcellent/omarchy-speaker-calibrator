@@ -267,8 +267,11 @@ calibration is pointed at this machine's speakers instead.
 Omarchy ships its own laptop tunings in, `tuning.conf` and `filter-chain.conf`
 under `default/audio/tunings/<vendor>-<model>/`, into your Downloads folder.
 The chain holds only what Omarchy ships: the high-pass, the fitted sections,
-the shelves and the limiter, with the bass add-on, loudness compensation and
-volume following left out. `tuning.conf` matches on the DMI product SKU and
+the shelves and the limiter, with loudness compensation and volume following
+left out. Deep bass travels with it when the switch is on: bankstown's recipe
+(the bass below the knee, saturated, its harmonics between the knee and three
+times the knee added back ahead of the EQ) is written out in PipeWire's
+built-in nodes, so the tuning needs no add-on. `tuning.conf` matches on the DMI product SKU and
 the speaker sink name, records where the tuning came from, and reports the
 four figures Omarchy asks for: the fit's RMS deviation from its target, the
 group delay swing over 30 to 300 Hz from the biquad coefficients, and the

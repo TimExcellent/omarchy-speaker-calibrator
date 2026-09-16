@@ -1905,7 +1905,7 @@ class VendorTuningTests(SharedCalibrationTests):
         self.assertEqual([round(freq) for _, freq, *_ in sections], [190, 190, 200, 600, 2500, 8000])
 
     def test_the_rendered_tuning_has_what_omarchy_checks_for(self):
-        self.install_active()
+        self.install_active(self.profile(deep_bass="off"))
         fake_metrics = {"bass_group_delay_swing_ms": 2.5, "limiter_headroom_db": 1.2, "peak_dbfs": -2.2,
                         "dynamic_range_delta_lu": 0.3, "signal": "pink noise"}
         with mock.patch.object(speaker_calibrate, "vendor_metrics", lambda *a, **k: fake_metrics):
@@ -1929,10 +1929,39 @@ class VendorTuningTests(SharedCalibrationTests):
                        'derived_from="Omarchy Speaker Calibrator'):
             self.assertIn(needle, tuning, needle)
 
+    def test_deep_bass_becomes_bankstown_s_recipe_in_built_in_nodes(self):
+        self.install_active(self.profile(deep_bass="on"))
+        fake_metrics = {"bass_group_delay_swing_ms": 2.5, "limiter_headroom_db": 1.2, "peak_dbfs": -2.2,
+                        "dynamic_range_delta_lu": 0.3, "signal": "pink noise"}
+        with mock.patch.object(speaker_calibrate, "vendor_metrics", lambda *a, **k: fake_metrics):
+            result = speaker_calibrate.vendor_tuning()
+        chain = (Path(result["directory"]) / "filter-chain.conf").read_text()
+        for needle in ('name = hb_in_l  label = copy', 'name = hb_cl_l  label = clamp        control = { "Min" = -10 "Max" = 10 }',
+                       'label = bq_lowpass   control = { "Freq" = 190 "Q" = 0.707 }',   # ceil at the knee
+                       'label = bq_lowpass   control = { "Freq" = 570 "Q" = 0.707 }',   # three times the knee
+                       '"Mult" = 3.5 "Add" = 0', 'label = exp          control = { "Base" = 2.718281828 }',
+                       'label = log          control = { "Base" = 2.718281828 "M1" = 1 "M2" = 1 }',
+                       'inputs  = [ "hb_in_l:In" "hb_in_r:In" ]',
+                       '{ output = "hb_cl_l:Out" input = "hb_mix_l:In 1" }', '{ output = "hb_fl_r:Out" input = "hb_mix_r:In 2" }',
+                       '{ output = "hb_mix_l:Out" input = "s0_l:In" }', "bankstown add-on's own recipe"):
+            self.assertIn(needle, chain, needle)
+        scale = speaker_calibrate.BANKSTOWN_SCALE * speaker_calibrate.BASS_ENHANCER_AMOUNT
+        self.assertIn(f'"Mult" = {-2 * scale:.6f} "Add" = {scale:.6f}', chain)
+        tuning = (Path(result["directory"]) / "tuning.conf").read_text()
+        self.assertIn("Deep bass is included", tuning)
+        # The node chain's arithmetic is a tanh: 1 - 2 * exp(-log(exp(2u) + 1)).
+        u = np.linspace(-17.0, 17.0, 2001)
+        via_nodes = 1.0 - 2.0 * np.exp(-np.log(np.exp(2.0 * u) + 1.0))
+        self.assertLess(float(np.max(np.abs(via_nodes - np.tanh(u)))), 1e-6)
+
     def test_metrics_come_from_a_simulated_pass_through_the_chain(self):
         sections = speaker_calibrate.vendor_sections(self.profile()["fit"])
         with mock.patch.object(speaker_calibrate, "VENDOR_SIMULATION_SECONDS", 2.0):
             metrics = speaker_calibrate.vendor_metrics(sections, 0.8, 48000)
+            harmonics = speaker_calibrate.vendor_harmonics(self.profile(deep_bass="on"))
+            with_bass = speaker_calibrate.vendor_metrics(sections, 0.8, 48000, harmonics=harmonics)
+        self.assertEqual(harmonics["ceil_hz"], 190.0)
+        self.assertGreater(with_bass["peak_dbfs"], metrics["peak_dbfs"] - 0.01)
         self.assertGreater(metrics["bass_group_delay_swing_ms"], 0.0)
         self.assertLess(metrics["peak_dbfs"], 0.0)
         self.assertAlmostEqual(metrics["limiter_headroom_db"], -1.0 - metrics["peak_dbfs"], places=1)

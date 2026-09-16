@@ -1111,6 +1111,82 @@ def _shelf_candidates(
     return candidates
 
 
+BASS_OPTIONS = ("normal", "full")
+LOUDNESS_OPTIONS = ("protected", "balanced", "matched")
+
+
+def level_variant(
+    frequencies, measured_smooth, base_correction, *, safe_boost_floor, highpass_hz,
+    rate_hz, bass, loudness, target=None, weights=None, valid=None, holdout=None,
+):
+    """What the bass and loudness switches decide, from a fitted correction.
+
+    ``base_correction`` is the safety high-pass plus the fitted sections and no
+    bass shelf.  The fit itself depends on neither switch, so this is the whole
+    of their effect: the shelf, the headroom it costs, the loudness the cuts
+    lose and how much of it is paid back.  It is worked out for every
+    combination when a profile is fitted and stored with it, so a switch later
+    is a lookup rather than a refit and gives exactly what a refit would; for a
+    profile from before that it is worked out on the fly from what it stored.
+    Returns the record to store, the total correction, and the unrounded
+    numbers the fit payload reports.
+    """
+    frequencies = np.asarray(frequencies, dtype=float)
+    measured_smooth = np.asarray(measured_smooth, dtype=float)
+    correction = np.asarray(base_correction, dtype=float)
+    shelf = bass_shelf(safe_boost_floor, bass, highpass_hz)
+    if shelf is not None:
+        correction = correction + _lowshelf_response_db(
+            frequencies, shelf["frequency_hz"], shelf["q"], shelf["gain_db"], rate_hz,
+        )
+    positive_peak = max(0.0, float(np.max(correction))) if correction.size else 0.0
+    headroom_db = max(1.0, math.ceil((positive_peak + 1.0) * 100.0) / 100.0)
+    # What the boosts actually cost, so the trade stops being invisible: this
+    # much headroom is reserved for them, and it is the same headroom the
+    # loudness make-up would otherwise have returned.
+    peak_index = int(np.argmax(correction)) if correction.size else 0
+    boost_budget = {
+        "allowance_db": BOOST_HEADROOM_BUDGET_DB,
+        "spent_db": round(positive_peak, 2),
+        "spent_at_hz": round(float(frequencies[peak_index]), 1) if positive_peak > 0 else None,
+        "excursion_weight": round(float(np.asarray(excursion_weight(
+            frequencies[peak_index], highpass_hz)).item()), 2),
+        "free_above_hz": round(float(highpass_hz) * EXCURSION_FREE_ABOVE_CORNER, 1),
+        "costs_makeup_db": round(headroom_db, 2),
+    }
+    # The cuts land where the speaker was loudest, so the corrected speaker
+    # plays quieter at the same volume setting.  Estimate how much, and let
+    # the loudness mode decide how much of it to add back before the limiter.
+    loudness_loss_db = max(0.0, (
+        pink_loudness_db(frequencies, measured_smooth)
+        - pink_loudness_db(frequencies, measured_smooth + correction)
+    ))
+    makeup_db = loudness_makeup_db(loudness_loss_db, loudness)
+    net_input_gain_db = makeup_db - headroom_db
+    record = {
+        "bass_mode": bass,
+        "loudness_mode": loudness,
+        "bass_shelf": shelf,
+        "headroom_db": headroom_db,
+        "boost_budget": boost_budget,
+        "loudness_loss_db": round(loudness_loss_db, 2),
+        "makeup_db": makeup_db,
+        "net_input_gain_db": round(net_input_gain_db, 2),
+        "input_gain_linear": round(10.0 ** (net_input_gain_db / 20.0), 6),
+        "predicted_response_db": np.round(measured_smooth + correction, 3).tolist(),
+        "correction_response_db": np.round(correction, 3).tolist(),
+    }
+    exact = {"loudness_loss_db": loudness_loss_db, "net_input_gain_db": net_input_gain_db,
+             "after_rmse": None, "cv_after": None}
+    if target is not None:
+        exact["after_rmse"] = _weighted_rmse(measured_smooth, correction, target, weights, valid)
+        record["weighted_rmse_after_db"] = round(exact["after_rmse"], 3)
+        if holdout is not None:
+            exact["cv_after"] = _weighted_rmse(holdout, correction, target, weights, valid)
+            record["cross_validation_rmse_after_db"] = round(exact["cv_after"], 3)
+    return record, correction, exact
+
+
 def optimize_peq(
     measurement: dict,
     voicing: str,
@@ -1385,50 +1461,35 @@ def optimize_peq(
         q_values=q_values,
         shapes=list(shapes),
     )
-    correction = safety_highpass + peq_response
-    shelf = bass_shelf(safe_boost_floor, bass, highpass["frequency_hz"])
-    if shelf is not None:
-        correction = correction + _lowshelf_response_db(
-            frequencies, shelf["frequency_hz"], shelf["q"], shelf["gain_db"],
-            measurement["rate_hz"],
+    base_correction = safety_highpass + peq_response
+    # Everything the bass and loudness switches decide is worked out for every
+    # combination here, so a switch later is a lookup and a live update rather
+    # than a refit, and gives exactly what a refit would have.
+    variant_pairs = {
+        f"{bass_option}/{loudness_option}": level_variant(
+            frequencies, measured_smooth, base_correction,
+            safe_boost_floor=safe_boost_floor, highpass_hz=highpass["frequency_hz"],
+            rate_hz=measurement["rate_hz"], bass=bass_option, loudness=loudness_option,
+            target=aligned_target, weights=weights, valid=valid, holdout=holdout,
         )
-    predicted = measured_smooth + correction
-    positive_peak = max(0.0, float(np.max(correction)))
-    headroom_db = max(1.0, math.ceil((positive_peak + 1.0) * 100.0) / 100.0)
-    # What the boosts actually cost, so the trade stops being invisible: this
-    # much headroom is reserved for them, and it is the same headroom the
-    # loudness make-up would otherwise have returned.
-    peak_index = int(np.argmax(correction)) if correction.size else 0
-    boost_budget = {
-        "allowance_db": BOOST_HEADROOM_BUDGET_DB,
-        "spent_db": round(positive_peak, 2),
-        "spent_at_hz": round(float(frequencies[peak_index]), 1) if positive_peak > 0 else None,
-        "excursion_weight": round(float(np.asarray(excursion_weight(
-            frequencies[peak_index], highpass["frequency_hz"])).item()), 2),
-        "free_above_hz": round(
-            float(highpass["frequency_hz"]) * EXCURSION_FREE_ABOVE_CORNER, 1),
-        "costs_makeup_db": round(headroom_db, 2),
+        for bass_option in BASS_OPTIONS for loudness_option in LOUDNESS_OPTIONS
     }
-    # The cuts land where the speaker was loudest, so the corrected speaker
-    # plays quieter at the same volume setting.  Estimate how much, and let
-    # the loudness mode decide how much of it to add back before the limiter.
-    loudness_loss_db = max(0.0, (
-        pink_loudness_db(frequencies, measured_smooth)
-        - pink_loudness_db(frequencies, measured_smooth + correction)
-    ))
-    makeup_db = loudness_makeup_db(loudness_loss_db, loudness)
-    net_input_gain_db = makeup_db - headroom_db
+    variant_records = {key: pair[0] for key, pair in variant_pairs.items()}
+    selected, correction, exact = variant_pairs[f"{bass}/{loudness}"]
+    shelf = selected["bass_shelf"]
+    predicted = measured_smooth + correction
+    headroom_db = selected["headroom_db"]
+    boost_budget = selected["boost_budget"]
+    loudness_loss_db = exact["loudness_loss_db"]
+    makeup_db = selected["makeup_db"]
+    net_input_gain_db = exact["net_input_gain_db"]
+    after_rmse = exact["after_rmse"]
+    cv_after = exact["cv_after"]
     before_rmse = _weighted_rmse(
         measured_smooth, np.zeros_like(frequencies), aligned_target, weights, valid
     )
-    after_rmse = _weighted_rmse(
-        measured_smooth, correction, aligned_target, weights, valid
-    )
     cv_before = _weighted_rmse(
         holdout, safety_highpass, aligned_target, weights, valid
-    )
-    cv_after = _weighted_rmse(
-        holdout, correction, aligned_target, weights, valid
     )
     cut_limits = [_filter_cut_limit_at(float(center), internal_mic) for center in centers]
     filters_payload = [
@@ -1474,6 +1535,7 @@ def optimize_peq(
         "highpass_stages": highpass["stages"],
         "bass_mode": bass,
         "bass_shelf": shelf,
+        "variants": variant_records,
         "channel_trim": estimate_channel_trim(
             measurement, internal_mic=internal_mic, mode=channel_trim
         ),

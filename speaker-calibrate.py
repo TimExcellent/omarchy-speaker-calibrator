@@ -434,9 +434,9 @@ def loudness_toggle():
         raise SystemExit("Calibrate the speakers first; there is nothing to compensate.")
     wanted = "off" if profile.get("loudness_compensation") == "on" else "on"
     profile["loudness_compensation"] = wanted
-    write_atomic(PROFILE, json.dumps(profile, indent=2) + "\n")
 
-    # The sound changes here, before anything slow is asked of systemd.  Only
+    # The sound changes here, before anything slow is asked of systemd or the
+    # disk.  Only
     # the compensator and the gain that pays its attenuation back move, so
     # this is a handful of milliseconds.
     fit = profile.get("fit") or {}
@@ -456,6 +456,7 @@ def loudness_toggle():
         ))
     else:
         method = activate_profile(profile)
+    write_atomic(PROFILE, json.dumps(profile, indent=2) + "\n")
 
     if wanted == "on":
         start_loudness_tracker()
@@ -1131,6 +1132,14 @@ def service_active():
 
 def tuning_node_id():
     """PipeWire id of the running tuning sink, or None."""
+    # pactl carries PipeWire's object id and answers in a third of the time a
+    # full dump takes; the dump remains as the fallback.
+    for item in pactl_json("sinks"):
+        if item.get("name") == VIRTUAL_SINK:
+            try:
+                return int((item.get("properties") or {})["object.id"])
+            except (KeyError, TypeError, ValueError):
+                break
     try:
         nodes = json.loads(run(["pw-dump"], capture=True).stdout)
     except (subprocess.CalledProcessError, ValueError, OSError):
@@ -1177,13 +1186,11 @@ def apply_controls_live(controls):
     node_id = tuning_node_id()
     if node_id is None:
         return False
-    current = live_controls(node_id)
-    if any(name not in current for name in controls):
-        # The running graph has a different shape (an older profile); only a
-        # restart can load the new one.
-        return False
     if not write_controls(node_id, controls):
         return False
+    # One read-back does both jobs: a control the running graph does not have
+    # (an older shape, which only a restart can replace) shows up as missing,
+    # and a value that did not land shows up as different.
     after = live_controls(node_id)
     for name, value in controls.items():
         try:
@@ -1211,16 +1218,28 @@ def activate_profile(profile):
         fit, bass_enhancer=enhancer, deep_bass=deep_bass,
         loudness_compensation=compensation, sink_volume_db=volume,
     )
-    write_atomic(FRAGMENT, filter_config(
+    graph = filter_config(
         profile["speaker"]["name"], fit, bass_enhancer=enhancer, deep_bass=deep_bass,
         loudness_compensation=compensation, sink_volume_db=volume,
-    ))
+    )
     state = compare_state()
     if state["bypass"]:
         state["bypass"] = False
         write_compare_state(state)
-    if service_active() and apply_controls_live(controls):
-        run(["systemctl", "--user", "daemon-reload"], check=False)
+    # The sound changes first.  The running graph never reads the file on
+    # disk, so nothing audible should wait for its fsyncs; and a live update
+    # touches no unit file, so systemd has nothing to reload (restart_tuning
+    # reloads before it restarts).
+    live = service_active() and apply_controls_live(controls)
+    # The graph file is written only when it changed, so that a restart, now
+    # or later, loads what is playing.
+    try:
+        unchanged = read_text_bounded(FRAGMENT) == graph
+    except (OSError, UnsafeFile):
+        unchanged = False
+    if not unchanged:
+        write_atomic(FRAGMENT, graph)
+    if live:
         return "live"
     restart_tuning()
     return "restart"
@@ -2023,10 +2042,111 @@ def deep_bass_toggle():
         raise SystemExit("Calibrate the speakers first; there is nothing to add bass to.")
     wanted = "off" if profile.get("deep_bass") == "on" else "on"
     profile["deep_bass"] = wanted
-    write_atomic(PROFILE, json.dumps(profile, indent=2) + "\n")
     method = activate_profile(profile)
+    write_atomic(PROFILE, json.dumps(profile, indent=2) + "\n")
     return {**status, "started": False, "deep_bass": wanted, "method": method,
             "message": ("Deep bass on" if wanted == "on" else "Deep bass off")}
+
+
+# The fields of a fit that the bass and loudness switches decide.  A fit made
+# by this version carries them for every combination; older fits get them
+# worked out on the fly by the same arithmetic.
+LEVEL_VARIANT_FIELDS = (
+    "bass_mode", "loudness_mode", "bass_shelf", "headroom_db", "boost_budget",
+    "loudness_loss_db", "makeup_db", "net_input_gain_db", "input_gain_linear",
+    "predicted_response_db", "correction_response_db", "weighted_rmse_after_db",
+    "cross_validation_rmse_after_db",
+)
+
+
+def level_variants_for(profile):
+    """Every bass and loudness combination of a fit, stored once.
+
+    A fit made by this version carries them.  An older one gets all six worked
+    out on the fly, which means loading the DSP stack once; they are kept with
+    the profile from then on, so the next switch is a lookup.
+    """
+    fit = profile["fit"]
+    if fit.get("variants"):
+        return fit["variants"]
+    load_dsp()
+    from calibration_optimizer import (
+        BASS_OPTIONS, LOUDNESS_OPTIONS, level_variant, _lowshelf_response_db,
+    )
+    measurement = profile.get("measurement") or {}
+    frequencies = np.asarray(measurement["frequency_hz"], dtype=float)
+    measured_smooth = np.asarray(fit["measured_smoothed_db"], dtype=float)
+    correction = np.asarray(fit["correction_response_db"], dtype=float)
+    shelf = fit.get("bass_shelf") or fit.get("low_shelf")
+    if shelf:
+        # Stored with its shelf in; the shelf is the one thing that moves.
+        correction = correction - _lowshelf_response_db(
+            frequencies, shelf["frequency_hz"], shelf["q"], shelf["gain_db"], measurement["rate_hz"],
+        )
+    fit["variants"] = {
+        f"{bass_option}/{loudness_option}": level_variant(
+            frequencies, measured_smooth, correction,
+            safe_boost_floor=fit.get("safe_boost_floor_hz", fit["highpass"]["frequency_hz"]),
+            highpass_hz=fit["highpass"]["frequency_hz"], rate_hz=measurement["rate_hz"],
+            bass=bass_option, loudness=loudness_option,
+        )[0]
+        for bass_option in BASS_OPTIONS for loudness_option in LOUDNESS_OPTIONS
+    }
+    return fit["variants"]
+
+
+def level_variant_for(profile, bass, loudness):
+    return level_variants_for(profile)[f"{bass}/{loudness}"]
+
+
+def apply_level_variant(profile, bass, loudness):
+    """Move a profile to another bass and loudness setting, in place."""
+    variant = level_variant_for(profile, bass, loudness)
+    fit = profile["fit"]
+    for field in LEVEL_VARIANT_FIELDS:
+        if field in variant:
+            fit[field] = variant[field]
+    fit.pop("low_shelf", None)
+    profile["bass"] = bass
+    profile["loudness"] = loudness
+    safety = profile.setdefault("safety", {})
+    safety["input_trim_db"] = -fit["headroom_db"]
+    safety["makeup_gain_db"] = fit["makeup_db"]
+    return profile
+
+
+def relevel(bass=None, loudness=None):
+    """The Loudness and Make-it-louder switches: no refit, applied live.
+
+    The fit does not depend on either, so nothing is measured or optimized
+    again; the stored variant is put in place and the running graph updated.
+    The proposal follows when it is this same measurement, so a later refit
+    starts from the settings that are playing.
+    """
+    profile = load_profile(PROFILE)
+    if profile is None:
+        raise SystemExit("Calibrate the speakers first; there is nothing to switch.")
+    bass = bass or profile.get("bass", "normal")
+    loudness = loudness or profile.get("loudness", "protected")
+    if bass not in BASS_LABELS or loudness not in LOUDNESS_LABELS:
+        raise SystemExit("Unknown bass or loudness setting.")
+    apply_level_variant(profile, bass, loudness)
+    # Heard first; written down after.
+    method = activate_profile(profile)
+    write_atomic(PROFILE, json.dumps(profile, indent=2) + "\n")
+    proposal = load_profile(PROPOSAL)
+    if (proposal and not proposal.get("imported")
+            and proposal.get("created_at") == profile.get("created_at")):
+        apply_level_variant(proposal, bass, loudness)
+        write_atomic(PROPOSAL, json.dumps(proposal, indent=2) + "\n")
+    else:
+        proposal = None
+    return {
+        "profile": profile, "proposal": proposal, "method": method,
+        "bass": bass, "loudness": loudness,
+        "message": f"{BASS_LABELS[bass]} · {LOUDNESS_LABELS[loudness]}"
+                   + (" · switched live" if method == "live" else " · tuning restarted"),
+    }
 
 
 def refine_from_check():
@@ -2742,6 +2862,9 @@ def main():
         sub.add_parser(name)
     sub.add_parser("verify-json")
     sub.add_parser("export-json")
+    relevel_parser = sub.add_parser("relevel-json")
+    relevel_parser.add_argument("--bass", choices=("normal", "full"))
+    relevel_parser.add_argument("--loudness", choices=("protected", "balanced", "matched"))
     imported = sub.add_parser("import-json")
     imported.add_argument("--file", help="a shared file in the Downloads folder, by name")
     imported.add_argument("--path", help="a shared file anywhere, for use from a terminal")
@@ -2799,6 +2922,8 @@ def main():
         print(json.dumps(bypass_toggle()))
     elif command == "verify-json":
         print(json.dumps(verify_calibration()))
+    elif command == "relevel-json":
+        print(json.dumps(relevel(bass=args.bass, loudness=args.loudness)))
     elif command == "export-json":
         print(json.dumps(export_profile()))
     elif command == "import-json":

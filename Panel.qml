@@ -100,10 +100,18 @@ Panel {
     return service.proposal !== null && service.proposal !== undefined
       && service.proposal.measurement !== undefined
   }
-  // A saved measurement is re-fitted and applied at once, so a toggle is heard
-  // immediately.  Without one the options simply wait for the next calibration.
+  // The two switches move only the bass shelf and the make-up gain, which the
+  // fit already holds for every combination, so they are applied live, in a
+  // fraction of a second.  A different voicing or channel trim changes the fit
+  // itself and goes through a refit; without any measurement the options
+  // simply wait for the next calibration.
   function applyOptions() {
-    if (root.hasMeasurement()) service.refit(root.options(), true)
+    var profile = service.status.profile
+    if (profile && service.status.enabled
+        && (profile.voicing || "neutral") === root.voicingMode
+        && (profile.channel_trim || "off") === root.channelTrimMode)
+      service.relevel(root.options())
+    else if (root.hasMeasurement()) service.refit(root.options(), true)
   }
   function adoptOptions(profile) {
     if (!profile) return

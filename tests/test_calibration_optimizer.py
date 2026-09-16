@@ -1821,5 +1821,57 @@ class SharedCalibrationTests(unittest.TestCase):
         self.assertEqual([entry["valid"] for entry in listed], [False])
 
 
+class LevelVariantTests(CalibrationOptimizerTests):
+    """The bass and loudness switches without a refit."""
+
+    def fitted(self, bass, loudness):
+        response = -6.0 * np.exp(-((np.log(self.frequencies / 700.0)) ** 2) / 0.4) \
+            - 12.0 * (self.frequencies < 150.0) * (150.0 - self.frequencies) / 150.0
+        return optimize_peq(self.measurement(response), "neutral", internal_mic=False,
+                            bass=bass, loudness=loudness)
+
+    def test_every_combination_is_stored_and_the_chosen_one_is_the_fit(self):
+        fit = self.fitted("full", "matched")
+        self.assertEqual(set(fit["variants"]), {f"{b}/{l}" for b in ("normal", "full")
+                                                for l in ("protected", "balanced", "matched")})
+        chosen = fit["variants"]["full/matched"]
+        for field in ("bass_shelf", "headroom_db", "boost_budget", "loudness_loss_db", "makeup_db",
+                      "net_input_gain_db", "input_gain_linear", "predicted_response_db",
+                      "correction_response_db", "weighted_rmse_after_db"):
+            self.assertEqual(fit[field], chosen[field], field)
+        self.assertIsNone(fit["variants"]["normal/matched"]["bass_shelf"])
+        self.assertEqual(fit["variants"]["normal/protected"]["makeup_db"], 0.0)
+
+    def test_a_stored_variant_is_what_a_refit_with_that_setting_gives(self):
+        first = self.fitted("full", "matched")
+        refit = self.fitted("normal", "protected")
+        self.assertEqual(first["filters"], refit["filters"])
+        variant = first["variants"]["normal/protected"]
+        for field in ("bass_shelf", "headroom_db", "makeup_db", "net_input_gain_db",
+                      "input_gain_linear", "correction_response_db", "predicted_response_db",
+                      "weighted_rmse_after_db", "boost_budget"):
+            self.assertEqual(refit[field], variant[field], field)
+
+    def test_an_older_profile_gets_the_same_answer_on_the_fly(self):
+        fit = self.fitted("full", "matched")
+        measurement = self.measurement(np.zeros(self.frequencies.size))
+        measurement["frequency_hz"] = self.frequencies.tolist()
+        profile = {"fit": {k: v for k, v in fit.items() if k != "variants"}, "measurement": measurement,
+                   "bass": "full", "loudness": "matched", "safety": {}}
+        computed = speaker_calibrate.level_variant_for(profile, "normal", "protected")
+        stored = fit["variants"]["normal/protected"]
+        for field in ("headroom_db", "makeup_db", "net_input_gain_db", "input_gain_linear"):
+            self.assertAlmostEqual(computed[field], stored[field], places=2, msg=field)
+        self.assertIsNone(computed["bass_shelf"])
+        self.assertLess(np.max(np.abs(np.asarray(computed["correction_response_db"])
+                                      - np.asarray(stored["correction_response_db"]))), 0.01)
+        speaker_calibrate.apply_level_variant(profile, "normal", "protected")
+        self.assertEqual(profile["bass"], "normal")
+        self.assertEqual(profile["loudness"], "protected")
+        self.assertEqual(profile["fit"]["input_gain_linear"], computed["input_gain_linear"])
+        self.assertEqual(profile["safety"]["input_trim_db"], -computed["headroom_db"])
+        self.assertEqual(profile["safety"]["makeup_gain_db"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

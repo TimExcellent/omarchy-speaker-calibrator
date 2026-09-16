@@ -37,6 +37,7 @@ Item {
       : operation === "refine" ? "Improving from the last check…"
       : operation === "deepbass" ? "Switching deep bass…"
       : operation === "loudness" ? "Switching loudness compensation…"
+      : operation === "relevel" ? "Switching…"
       : operation === "export" ? "Exporting the calibration…"
       : operation === "import" ? "Loading the shared calibration…"
       : operation === "refit" ? "Applying…" : "Working…"
@@ -163,6 +164,11 @@ Item {
     start("refit", arguments)
   }
   function install() { start("install", ["install-proposal"]) }
+  // Bass and loudness without a refit: the fit already holds both answers.
+  function relevel(options) {
+    start("relevel", ["relevel-json", "--bass", options.bass || "normal",
+                      "--loudness", options.loudness || "protected"])
+  }
   // Hand the calibration that is playing to someone, or take theirs in.  The
   // name is one the helper listed from the Downloads folder; it checks it again.
   function exportProfile() { start("export", ["export-json"]) }
@@ -346,6 +352,12 @@ Item {
           root.status = Object.assign({}, root.status, { enabled: true, profile: installed, bypass: false })
           root.message = "Installed and playing: " + root.optionsLabel(installed)
             + (installed.activation === "restart" ? " · tuning restarted" : " · switched live")
+          Qt.callLater(root.refreshStatus)
+        } else if (root.phase === "relevel") {
+          var levelled = JSON.parse(raw)
+          root.status = Object.assign({}, root.status, { profile: levelled.profile, bypass: false })
+          if (levelled.proposal) root.proposal = levelled.proposal
+          root.message = levelled.message || ""
           Qt.callLater(root.refreshStatus)
         } else if (root.phase === "export") {
           var exported = JSON.parse(raw)

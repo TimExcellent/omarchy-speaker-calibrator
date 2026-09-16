@@ -178,7 +178,8 @@ as the level falls, using the ISO 226:2023 equal-loudness curves. Full volume
 is the reference: it does nothing there and more the further down you play.
 The loudness stays the same either way; only the tone moves. It is the one
 part of this that needs something running in the background, because only the
-output device knows the listening level.
+output device knows the listening level. It is on by default for a new calibration; the switch under
+Advanced turns it off, and the setting is kept across refits.
 
 ### Which microphones can measure
 

@@ -732,6 +732,9 @@ LOUDNESS_EXTRA_DEPTH_DB = 12.0
 # back this share keeps the loudness roughly where it was and leaves the
 # limiter the headroom the lift needs.
 LOUDNESS_MAKEUP_SHARE = 0.85
+# A new calibration follows the volume from the start; the switch under
+# Advanced turns it off.  An existing profile keeps whatever it had.
+LOUDNESS_COMPENSATION_DEFAULT = "on"
 LOUDNESS_SERVICE = "omarchy-speaker-loudness.service"
 LOUDNESS_TRACKER = "loudness-tracker.py"
 
@@ -1679,7 +1682,7 @@ def profile_from_measurement(
         # Carried across refits so switching voicing does not lose them.
         "deep_bass": (load_profile(PROFILE) or {}).get("deep_bass", "off"),
         "loudness_compensation":
-            (load_profile(PROFILE) or {}).get("loudness_compensation", "off"),
+            (load_profile(PROFILE) or {}).get("loudness_compensation", LOUDNESS_COMPENSATION_DEFAULT),
         "safety": {
             "eq_max_db": fit_payload["maximum_allowed_boost_db"] if fit_payload else 0,
             "eq_min_db": fit_payload["cut_limit_db"] if fit_payload else 0,
@@ -2000,6 +2003,12 @@ def install_now(profile):
         ),
     )
     profile["installed"] = True
+    # The tracker follows the profile that is now playing: started when it
+    # asks for compensation, stopped when it does not.
+    if profile.get("loudness_compensation") == "on":
+        start_loudness_tracker()
+    else:
+        stop_loudness_tracker()
     return profile
 
 
@@ -2643,7 +2652,7 @@ def import_profile(name=None, path=None):
     # The switches are this machine's, not the exporter's.
     current = load_profile(PROFILE) or {}
     profile["deep_bass"] = current.get("deep_bass", "off")
-    profile["loudness_compensation"] = current.get("loudness_compensation", "off")
+    profile["loudness_compensation"] = current.get("loudness_compensation", LOUDNESS_COMPENSATION_DEFAULT)
     profile["imported"] = {
         "file": source.name, "name": short_label(payload.get("name")),
         "exported_at": short_label(payload.get("exported_at"), 40),

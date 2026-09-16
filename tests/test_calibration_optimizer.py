@@ -1765,6 +1765,7 @@ class SharedCalibrationTests(unittest.TestCase):
         self.assertEqual(result["proposal"]["speaker"]["name"], "alsa_output.pci-xps.analog-stereo")
         self.assertFalse(result["proposal"]["imported"]["matches"]["machine"])
         self.assertEqual(result["proposal"]["deep_bass"], "off")
+        self.assertEqual(result["proposal"]["loudness_compensation"], "on")
 
     def test_hardware_matching_prefers_the_sku(self):
         matches = speaker_calibrate.hardware_matches
@@ -1938,6 +1939,29 @@ class VendorTuningTests(SharedCalibrationTests):
         self.assertIn("pink noise", metrics["signal"])
         if metrics["dynamic_range_delta_lu"] is not None:
             self.assertLess(abs(metrics["dynamic_range_delta_lu"]), 10.0)
+
+
+class InstallDefaultsTests(unittest.TestCase):
+    def test_a_new_calibration_follows_the_volume_by_default(self):
+        self.assertEqual(speaker_calibrate.LOUDNESS_COMPENSATION_DEFAULT, "on")
+
+    def test_installing_starts_or_stops_the_tracker_to_match_the_profile(self):
+        calls = []
+        patches = [
+            mock.patch.object(speaker_calibrate, "install_profile", lambda profile, graph: "live"),
+            mock.patch.object(speaker_calibrate, "filter_config", lambda *a, **k: "graph"),
+            mock.patch.object(speaker_calibrate, "bass_enhancer_status", lambda: {"usable": False}),
+            mock.patch.object(speaker_calibrate, "sink_volume_db", lambda sink: 0.0),
+            mock.patch.object(speaker_calibrate, "listening_sink", lambda profile: "sink"),
+            mock.patch.object(speaker_calibrate, "start_loudness_tracker", lambda: calls.append("start")),
+            mock.patch.object(speaker_calibrate, "stop_loudness_tracker", lambda: calls.append("stop")),
+        ]
+        for patch in patches:
+            patch.start(); self.addCleanup(patch.stop)
+        base = {"quality": {"accepted": True}, "fit": {"filters": []}, "speaker": {"name": "s"}}
+        speaker_calibrate.install_now({**base, "loudness_compensation": "on"})
+        speaker_calibrate.install_now({**base, "loudness_compensation": "off"})
+        self.assertEqual(calls, ["start", "stop"])
 
 
 class VendorTrialTests(unittest.TestCase):

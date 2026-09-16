@@ -56,51 +56,16 @@ Everything else lives under **Advanced**: voicing, the three loudness levels,
 channel balance, loudness compensation, the measurement details, and a
 comparison of what each microphone measured.
 
-## Deep bass needs one optional package
+## Deep bass, built in
 
-Everything above runs on what Omarchy ships. **Deep bass** is the exception.
-It needs a free package called `bankstown`, and it is not installed unless you
-press the button that installs it.
-
-The reason it is optional is that `bankstown` is not one of Omarchy's curated
-packages, so it is built from source on your machine rather than installed as
-a reviewed binary. That is a judgement about software you install, so the
-plugin does not make it for you. The panel tells you what it is about to do
-before it does anything, and you can read
-[the upstream source](https://github.com/chadmed/bankstown) first.
-
-What gets built is fixed. The plugin ships its own `bass-enhancer/PKGBUILD`,
-which names upstream release 1.1.0 by the full hash of its commit
-(`e9829c9bccf5ed73768135c0ddd506f5a6690f9e`) and by the checksum of that
-commit's archive. `makepkg` fetches exactly that, the build script reads back
-the commit and tree hashes of what was fetched and stops if they differ, and
-only then does `cargo` build it with the dependency set frozen to that
-commit's `Cargo.lock`. Nothing is looked up in the AUR, at install time or
-ever, so a later change to the AUR package or to upstream cannot reach you
-through this plugin. Building needs the Rust toolchain, which `makepkg`
-installs from Omarchy's own package repositories if it is missing, and the
-finished package is installed by `pacman`, which asks for your password in the
-terminal window that opens. Should Omarchy's repositories ever carry
-`bankstown` themselves, the plugin installs that signed package instead.
-
-`bankstown` is written by James Calligeros and released under the MIT
-licence, which is installed alongside it.
-
-Leave it alone and the calibration is complete and unaffected.
-
-### Why it works
-
-Small speakers cannot move enough air to make a low note at all. Rather than
-asking them to try, Deep bass plays the harmonics of those notes, which the
-speakers can produce, and the ear supplies the fundamental it never heard.
-
-A note is not only its fundamental. A bass guitar playing a 55 Hz note also
-radiates energy at 110, 165 and 220 Hz, and the ear works out the pitch from
-the spacing of that series rather than from the presence of the lowest tone.
-Remove the fundamental entirely and the pitch does not change: only a 55 Hz
-note produces harmonics spaced 55 Hz apart. This is the missing fundamental,
-described by Seebeck in 1841, and it is why a telephone limited to 300 Hz and
-above still carries a voice whose fundamental is near 100 Hz.
+Your speakers are too small to make low notes at all. **Deep bass** plays
+their harmonics instead, and your ear fills in the note that is missing: what
+lies below the measured knee is saturated and its harmonics between the knee
+and three times the knee are added back ahead of the EQ, where the drivers can
+play them. The recipe is bankstown's, the bass enhancer James Calligeros wrote
+for Asahi Linux (MIT), written out in PipeWire's own built-in nodes, so
+nothing has to be installed and it works on every Omarchy machine out of the
+box. It is on by default; the switch turns it off.
 
 ## How it works
 
@@ -310,11 +275,6 @@ plugin never opens a socket.
 An exported calibration is a file in your Downloads folder and goes nowhere
 unless you send it; loading one reads a file from that folder and nothing else.
 
-The one exception is the optional `bankstown` package, and only if you press
-the button that installs it: `makepkg` then fetches the pinned upstream commit
-from github.com and `cargo` fetches the crates named in its `Cargo.lock` from
-crates.io, in a terminal window you can watch.
-
 The microphone is opened only while a measurement is running. The recordings
 stay on disk under `~/.local/share/omarchy-speaker-calibrator/` and are never
 uploaded.
@@ -357,10 +317,6 @@ systemctl --user daemon-reload
 rm -rf ~/.local/share/omarchy-speaker-calibrator
 ```
 
-If you installed `bankstown` it is a normal system package and is left alone.
-Remove it with `pacman -R bankstown` if you want it gone. The directory it was
-built in, under `~/.cache/omarchy-speaker-calibrator/`, is removed as soon as
-the build finishes, whether or not it succeeded.
 
 ## Runtime dependencies
 
@@ -370,8 +326,6 @@ the build finishes, whether or not it succeeded.
 | `lsp-plugins-lv2` | yes | the filter chain, the limiter, loudness compensation |
 | `python-numpy` | no | measuring |
 | `python-scipy` | no | measuring |
-| `bankstown` | no; built from a pinned upstream commit by the plugin's own PKGBUILD | the optional Deep bass switch |
-| `rust` | no; installed from the official repositories by `makepkg` when building `bankstown` | building the optional Deep bass add-on |
 
 Only measuring waits on the two Omarchy does not ship. The panel checks all
 three and offers to install whichever are missing, so removing one by hand is

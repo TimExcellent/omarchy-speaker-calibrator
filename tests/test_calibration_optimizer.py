@@ -214,7 +214,7 @@ class CalibrationOptimizerTests(unittest.TestCase):
             "bass_shelf": {"frequency_hz": 500, "q": 0.707, "gain_db": 3.0},
             "input_gain_linear": 0.5,
         }
-        controls = speaker_calibrate.graph_controls(fit, bass_enhancer=False)
+        controls = speaker_calibrate.graph_controls(fit)
         self.assertEqual(controls["ls_l:Freq"], 300.0)
         self.assertEqual(controls["ls_r:Gain"], -3.0)
         self.assertEqual(controls["bs_l:Freq"], 500.0)
@@ -223,13 +223,13 @@ class CalibrationOptimizerTests(unittest.TestCase):
         self.assertEqual(controls["p2_l:Gain"], 0.0)
         self.assertEqual(controls["hs_l:Freq"], 4000.0)
         self.assertEqual(controls["hs_r:Gain"], -4.0)
-        graph = speaker_calibrate.filter_config("alsa_output.synthetic", fit, bass_enhancer=False)
+        graph = speaker_calibrate.filter_config("alsa_output.synthetic", fit)
         self.assertIn('name = bs_l label = bq_lowshelf control = { "Freq" = 500 "Q" = 0.707 "Gain" = 3 }', graph)
         # A 0.10.0 profile stored the bass shelf as low_shelf.
         legacy = {"centers_hz": [1000], "q": [1.0], "gains_db": [-2.5],
                   "low_shelf": {"frequency_hz": 500, "q": 0.707, "gain_db": 3.0},
                   "input_gain_linear": 0.5}
-        legacy_controls = speaker_calibrate.graph_controls(legacy, bass_enhancer=False)
+        legacy_controls = speaker_calibrate.graph_controls(legacy)
         self.assertEqual(legacy_controls["bs_l:Gain"], 3.0)
         self.assertEqual(legacy_controls["ls_l:Gain"], 0.0)
 
@@ -335,7 +335,7 @@ class CalibrationOptimizerTests(unittest.TestCase):
             "gains_db": [-2.5, 0.75],
             "input_gain_linear": 0.812345,
         }
-        graph = speaker_calibrate.filter_config("alsa_output.synthetic", fit, bass_enhancer=False)
+        graph = speaker_calibrate.filter_config("alsa_output.synthetic", fit)
         self.assertIn('"Freq" = 1000 "Q" = 1 "Gain" = -2.5', graph)
         self.assertIn('"Freq" = 2500 "Q" = 1.2 "Gain" = 0.75', graph)
         self.assertIn('"g_in" = 0.812345', graph)
@@ -355,12 +355,13 @@ class CalibrationOptimizerTests(unittest.TestCase):
             "gains_db": [-2.5, 0.75],
             "input_gain_linear": 0.812345,
         }
-        controls = speaker_calibrate.graph_controls(fit, bass_enhancer=False)
+        controls = speaker_calibrate.graph_controls(fit)
         slots = speaker_calibrate.PEAKING_SLOTS
         # Per channel: two high-passes, three shelves, the parametric slots,
         # and the balance trim's two controls; plus the limiter's input gain
         # and the compensator's six, which are not per channel.
-        self.assertEqual(len(controls), 2 * (2 * 2 + 3 + 3 + 3 * slots + 3 + 2) + 1 + 6)
+        # ... plus the deep-bass path: three corners and one gain per channel.
+        self.assertEqual(len(controls), 2 * (2 * 2 + 3 + 3 + 3 * slots + 3 + 2) + 1 + 6 + 8)
         self.assertEqual(controls["bs_l:Gain"], 0.0)
         self.assertEqual(controls["bal_l:Mult"], 1.0)
         self.assertEqual(controls["bal_r:Add"], 0.0)
@@ -378,21 +379,21 @@ class CalibrationOptimizerTests(unittest.TestCase):
                 "q": [1.0] * (slots + 1),
                 "gains_db": [-1.0] * (slots + 1),
                 "input_gain_linear": 1.0,
-            }, bass_enhancer=False)
+            })
 
     def test_graph_parks_the_second_highpass_when_one_stage_is_enough(self):
         base = {"centers_hz": [1000], "q": [1.0], "gains_db": [-2.0], "input_gain_linear": 0.9}
         one = speaker_calibrate.graph_controls(dict(
-            base, highpass={"frequency_hz": 160.0, "q": 0.707, "stages": 1}), bass_enhancer=False)
+            base, highpass={"frequency_hz": 160.0, "q": 0.707, "stages": 1}))
         self.assertEqual(one["hp1_l:Freq"], 160.0)
         self.assertEqual(one["hp2_l:Freq"], speaker_calibrate.PARKED_HIGHPASS_HZ)
         self.assertEqual(one["hp2_r:Freq"], speaker_calibrate.PARKED_HIGHPASS_HZ)
         two = speaker_calibrate.graph_controls(dict(
-            base, highpass={"frequency_hz": 80.0, "q": 0.707, "stages": 2}), bass_enhancer=False)
+            base, highpass={"frequency_hz": 80.0, "q": 0.707, "stages": 2}))
         self.assertEqual(two["hp1_r:Freq"], 80.0)
         self.assertEqual(two["hp2_r:Freq"], 80.0)
         # A profile from before the high-pass was measured keeps its old chain.
-        legacy = speaker_calibrate.graph_controls(base, bass_enhancer=False)
+        legacy = speaker_calibrate.graph_controls(base)
         self.assertEqual(legacy["hp1_l:Freq"], speaker_calibrate.DEFAULT_HIGHPASS_HZ)
         self.assertEqual(legacy["hp2_l:Freq"], speaker_calibrate.DEFAULT_HIGHPASS_HZ)
 
@@ -575,7 +576,7 @@ class BypassTests(unittest.TestCase):
 
     def test_the_match_reaches_the_graph_as_input_gain(self):
         controls = speaker_calibrate.transparent_controls(
-            bass_enhancer=False, level_match_db=-8.6
+            level_match_db=-8.6
         )
         self.assertAlmostEqual(controls["limiter:g_in"], 10 ** (-8.6 / 20.0), places=5)
         # Everything else is still flat, so only the level differs.
@@ -586,11 +587,11 @@ class BypassTests(unittest.TestCase):
     def test_a_measurement_flattens_without_the_match(self):
         # The speaker has to be measured as it is, not as the correction
         # leaves it, so the flattening used for a calibration is unity.
-        controls = speaker_calibrate.transparent_controls(bass_enhancer=False)
+        controls = speaker_calibrate.transparent_controls()
         self.assertEqual(controls["limiter:g_in"], 1.0)
 
     def test_transparent_controls_pass_audio_through(self):
-        controls = speaker_calibrate.transparent_controls(bass_enhancer=False)
+        controls = speaker_calibrate.transparent_controls()
         self.assertEqual(controls["limiter:g_in"], 1.0)
         for name, value in controls.items():
             if name.endswith(":Gain"):
@@ -598,7 +599,7 @@ class BypassTests(unittest.TestCase):
             if name.startswith("hp") and name.endswith(":Freq"):
                 self.assertEqual(value, 10.0, name)
         self.assertEqual(set(controls), set(speaker_calibrate.graph_controls(
-            {"filters": [], "input_gain_linear": 1.0}, bass_enhancer=False
+            {"filters": [], "input_gain_linear": 1.0}
         )))
 
 
@@ -715,7 +716,7 @@ class RawMeasurementTests(unittest.TestCase):
         installed = module.graph_controls({
             "filters": [{"type": "peaking", "frequency_hz": 800.0, "q": 1.0, "gain_db": -6.0}],
             "input_gain_linear": 0.9,
-        }, bass_enhancer=False)
+        })
         applied = []
         try:
             module.service_active = lambda: True
@@ -723,9 +724,7 @@ class RawMeasurementTests(unittest.TestCase):
             module.compare_state = lambda: {"active": "current", "bypass": False}
             module.live_controls = lambda node_id: dict(installed, **{"limiter:grgv_l": 1.0})
             module.apply_controls_live = lambda controls: applied.append(dict(controls)) or True
-            module.transparent_controls = lambda bass_enhancer=None: original_transparent(
-                bass_enhancer=False
-            )
+            module.transparent_controls = lambda: original_transparent()
             with module.correction_silenced() as silenced:
                 self.assertTrue(silenced)
                 self.assertEqual(applied[-1]["p1_l:Gain"], 0.0)
@@ -745,7 +744,7 @@ class RawMeasurementTests(unittest.TestCase):
         )}
         running = {
             "hp1_l:Freq": 195.8, "p1_l:Gain": -7.0, "limiter:g_in": 1.66,
-            "bass:bypass": 0.0, "bass:amt": 1.45, "bass:ceil": 195.8,
+            "hb_out_l:Mult": 2.830895, "hb_out_r:Mult": 2.830895, "hb_lp_l:Freq": 195.8,
             "loudcomp:enabled": 0.0,
         }
         applied = []
@@ -760,14 +759,12 @@ class RawMeasurementTests(unittest.TestCase):
             for name, value in saved.items():
                 setattr(module, name, value)
         self.assertEqual(len(applied), 2)
-        self.assertEqual(applied[0]["bass:bypass"], 1.0)
-        self.assertEqual(applied[0]["bass:amt"], 0.0)
-        # Only the add-on is touched: the filters under test stay as they are.
+        self.assertEqual(applied[0]["hb_out_l:Mult"], 0.0)
+        self.assertEqual(applied[0]["hb_out_r:Mult"], 0.0)
+        # Only the deep-bass gain is touched: the filters under test stay as they are.
         self.assertNotIn("p1_l:Gain", applied[0])
         self.assertNotIn("limiter:g_in", applied[0])
-        self.assertEqual(applied[1], {
-            "bass:bypass": 0.0, "bass:amt": 1.45, "bass:ceil": 195.8,
-        })
+        self.assertEqual(applied[1], {"hb_out_l:Mult": 2.830895, "hb_out_r:Mult": 2.830895})
 
     def test_nothing_is_muted_when_nothing_is_inventing_sound(self):
         module = speaker_calibrate
@@ -779,7 +776,7 @@ class RawMeasurementTests(unittest.TestCase):
             module.service_active = lambda: True
             module.tuning_node_id = lambda: 7
             module.live_controls = lambda node_id: {
-                "bass:bypass": 1.0, "bass:amt": 0.0, "loudcomp:enabled": 0.0,
+                "hb_out_l:Mult": 0.0, "hb_out_r:Mult": 0.0, "loudcomp:enabled": 0.0,
             }
             module.apply_controls_live = lambda controls: touched.append(controls) or True
             with module.added_sound_silenced() as muted:
@@ -903,167 +900,50 @@ class RefinementTests(unittest.TestCase):
         self.assertLess(cut_at(second, 1500.0), cut_at(first, 1500.0) - 2.0)
 
 
-class BassEnhancerTests(unittest.TestCase):
+class HarmonicBassTests(unittest.TestCase):
+    """Deep bass built into the graph, in PipeWire's own nodes."""
     fit = {
         "filters": [{"type": "peaking", "frequency_hz": 900.0, "q": 1.2, "gain_db": -5.0}],
         "highpass": {"frequency_hz": 185.0, "q": 0.707, "stages": 1},
         "input_gain_linear": 0.9,
     }
 
-    def bundle(self, folder, *, ports=None, uri=None):
-        """A pretend LV2 bundle, complete or deliberately broken."""
-        module = speaker_calibrate
-        ports = module.BASS_ENHANCER_PORTS if ports is None else ports
-        directory = Path(folder) / "bankstown.lv2"
-        directory.mkdir(parents=True)
-        body = f"<{uri or module.BASS_ENHANCER_URI}> a lv2:Plugin ;\n"
-        body += "".join(f'    lv2:port [ lv2:symbol "{port}" ] ;\n' for port in ports)
-        (directory / "bankstown.ttl").write_text(body)
-        return directory
-
-    def with_paths(self, folder):
-        module = speaker_calibrate
-        original = module.BASS_ENHANCER_SEARCH_PATHS
-        module.BASS_ENHANCER_SEARCH_PATHS = (str(folder),)
-        return original
-
-    def test_a_complete_bundle_is_detected(self):
-        module = speaker_calibrate
-        with tempfile.TemporaryDirectory() as folder:
-            directory = self.bundle(folder)
-            original = self.with_paths(folder)
-            try:
-                status = module.bass_enhancer_status()
-            finally:
-                module.BASS_ENHANCER_SEARCH_PATHS = original
-        self.assertTrue(status["usable"])
-        self.assertTrue(status["installed"])
-        self.assertEqual(status["path"], str(directory))
-        self.assertEqual(status["missing_ports"], [])
-
-    def test_a_build_missing_ports_is_refused(self):
-        module = speaker_calibrate
-        with tempfile.TemporaryDirectory() as folder:
-            self.bundle(folder, ports=("in_l", "in_r", "out_l", "out_r", "bypass"))
-            original = self.with_paths(folder)
-            try:
-                status = module.bass_enhancer_status()
-            finally:
-                module.BASS_ENHANCER_SEARCH_PATHS = original
-        self.assertTrue(status["installed"])
-        self.assertFalse(status["usable"])
-        self.assertIn("amt", status["missing_ports"])
-
-    def test_nothing_installed_reports_nothing(self):
-        module = speaker_calibrate
-        with tempfile.TemporaryDirectory() as folder:
-            original = self.with_paths(folder)
-            try:
-                status = module.bass_enhancer_status()
-            finally:
-                module.BASS_ENHANCER_SEARCH_PATHS = original
-        self.assertFalse(status["installed"])
-        self.assertFalse(status["usable"])
-
-    def test_the_graph_never_mentions_an_absent_add_on(self):
-        graph = speaker_calibrate.filter_config(
-            "alsa_output.x", self.fit, bass_enhancer=False, deep_bass=False
-        )
-        self.assertNotIn("bankstown", graph)
-        self.assertNotIn("bass:", graph)
-        # Without the add-on the compensator is what the sound enters through.
-        self.assertIn('inputs  = [ "loudcomp:in_l" "loudcomp:in_r" ]'.replace("  ", " "),
-                      graph.replace("  ", " "))
-        self.assertIn('{ output = "loudcomp:out_l" input = "hp1_l:In" }', graph)
-        controls = speaker_calibrate.graph_controls(self.fit, bass_enhancer=False)
-        self.assertFalse([name for name in controls if name.startswith("bass:")])
-
-    def test_the_add_on_is_wired_in_front_of_the_high_pass(self):
-        graph = speaker_calibrate.filter_config(
-            "alsa_output.x", self.fit, bass_enhancer=True, deep_bass=True
-        )
-        self.assertIn(speaker_calibrate.BASS_ENHANCER_URI, graph)
-        self.assertIn('{ output = "bass:out_l" input = "loudcomp:in_l" }', graph)
-        self.assertIn('{ output = "bass:out_r" input = "loudcomp:in_r" }', graph)
-        self.assertIn('"bass:in_l"', graph)
-        self.assertIn('"bass:in_r"', graph)
-        # The links are what order a filter chain, not the order the nodes
-        # happen to be declared in: sound enters the add-on, so it sees the
-        # bass before anything shapes or removes it.
-        self.assertIn('"bass:in_l"', graph)
-        self.assertIn('{ output = "loudcomp:out_l" input = "hp1_l:In" }', graph)
-        self.assertNotIn('input = "bass:in_l" }', graph)
+    def test_the_path_sits_ahead_of_the_compensator_in_every_graph(self):
+        graph = speaker_calibrate.filter_config("alsa_output.x", self.fit, deep_bass=True)
+        for needle in ('name = hb_in_l', 'name = hb_mix_r', 'label = exp', 'label = log',
+                       '{ output = "hb_mix_l:Out" input = "loudcomp:in_l" }',
+                       '{ output = "hb_cl_r:Out" input = "hb_mix_r:In 1" }',
+                       'inputs = [ "hb_in_l:In" "hb_in_r:In" ]'):
+            self.assertIn(needle, graph, needle)
+        self.assertNotIn("type = lv2 name = bass", graph)
+        self.assertNotIn("chadmed", graph)
+        for line in graph.splitlines():
+            if "label = linear" in line:
+                self.assertNotIn('"Mult" = -', line, line)
 
     def test_its_band_follows_the_measured_knee(self):
-        controls = speaker_calibrate.graph_controls(
-            self.fit, bass_enhancer=True, deep_bass=True
-        )
-        self.assertEqual(controls["bass:ceil"], 185.0)
-        self.assertEqual(controls["bass:final_hp"], 185.0)
-        self.assertEqual(controls["bass:floor"], speaker_calibrate.BASS_ENHANCER_FLOOR_HZ)
-        self.assertEqual(controls["bass:bypass"], 0.0)
-        self.assertEqual(controls["bass:amt"], speaker_calibrate.BASS_ENHANCER_AMOUNT)
+        controls = speaker_calibrate.graph_controls(self.fit, deep_bass=True)
+        self.assertEqual(controls["hb_lp_l:Freq"], 185.0)
+        self.assertEqual(controls["hb_fh_r:Freq"], 185.0)
+        self.assertEqual(controls["hb_fl_l:Freq"], 555.0)
+        self.assertAlmostEqual(controls["hb_out_l:Mult"],
+                               2.0 * speaker_calibrate.HARMONIC_SCALE * speaker_calibrate.HARMONIC_AMOUNT, places=6)
+        settings = speaker_calibrate.harmonic_settings(400.0)
+        self.assertEqual(settings["ceil_hz"], speaker_calibrate.HARMONIC_MAX_HZ)
 
-    def test_switching_it_off_only_changes_controls(self):
-        on = speaker_calibrate.graph_controls(self.fit, bass_enhancer=True, deep_bass=True)
-        off = speaker_calibrate.graph_controls(self.fit, bass_enhancer=True, deep_bass=False)
+    def test_switching_it_off_changes_one_control_per_channel_and_nothing_else(self):
+        on = speaker_calibrate.graph_controls(self.fit, deep_bass=True)
+        off = speaker_calibrate.graph_controls(self.fit, deep_bass=False)
         self.assertEqual(set(on), set(off))
-        self.assertEqual(off["bass:bypass"], 1.0)
-        self.assertEqual(off["bass:amt"], 0.0)
-        # Everything that is not the add-on is untouched, so it applies live.
-        self.assertEqual(
-            {k: v for k, v in on.items() if not k.startswith("bass:")},
-            {k: v for k, v in off.items() if not k.startswith("bass:")},
-        )
+        self.assertEqual(off["hb_out_l:Mult"], 0.0)
+        self.assertEqual(off["hb_out_r:Mult"], 0.0)
+        self.assertEqual({k: v for k, v in on.items() if not k.startswith("hb_out_")},
+                         {k: v for k, v in off.items() if not k.startswith("hb_out_")})
+        self.assertEqual(speaker_calibrate.transparent_controls()["hb_out_r:Mult"], 0.0)
 
-    def test_a_corner_above_the_plugin_limit_is_clamped(self):
-        fit = dict(self.fit, highpass={"frequency_hz": 400.0, "q": 0.707, "stages": 1})
-        controls = speaker_calibrate.graph_controls(fit, bass_enhancer=True, deep_bass=True)
-        self.assertEqual(controls["bass:ceil"], speaker_calibrate.BASS_ENHANCER_MAX_HZ)
-        self.assertEqual(controls["bass:final_hp"], speaker_calibrate.BASS_ENHANCER_MAX_HZ)
-
-    def install_command_with(self, stdout, returncode=0):
-        module = speaker_calibrate
-        original = module.run
-        class Result:
-            pass
-        result = Result()
-        result.returncode = returncode
-        result.stdout = stdout
-        try:
-            module.run = lambda *args, **kwargs: result
-            return module.bass_enhancer_install_command()
-        finally:
-            module.run = original
-
-    def test_a_repository_copy_is_preferred_over_a_source_build(self):
-        command, repository = self.install_command_with(
-            "Repository      : omarchy\nName            : bankstown\n"
-        )
-        self.assertEqual(command, "omarchy pkg add bankstown")
-        self.assertEqual(repository, "omarchy")
-
-    def test_any_repository_counts_not_just_omarchy(self):
-        command, repository = self.install_command_with(
-            "Repository      : extra\nName            : bankstown\n"
-        )
-        self.assertEqual(command, "omarchy pkg add bankstown")
-        self.assertEqual(repository, "extra")
-
-    def test_it_falls_back_to_the_pinned_build_when_no_repository_has_it(self):
-        command, repository = self.install_command_with("", returncode=1)
-        self.assertEqual(command.split()[0], "/usr/bin/bash")
-        self.assertTrue(command.endswith("/bass-enhancer/install.sh"), command)
-        self.assertIsNone(repository)
-
-    def test_bypassing_the_calibration_matches_the_running_shape(self):
-        with_addon = speaker_calibrate.transparent_controls(bass_enhancer=True)
-        without = speaker_calibrate.transparent_controls(bass_enhancer=False)
-        self.assertEqual(with_addon["bass:bypass"], 1.0)
-        self.assertEqual(
-            set(with_addon) - set(without),
-            {name for name in with_addon if name.startswith("bass:")},
-        )
+    def test_the_status_says_it_is_built_in(self):
+        status = speaker_calibrate.harmonic_bass_status()
+        self.assertTrue(status["usable"]); self.assertTrue(status["builtin"]); self.assertIsNone(status["package"])
 
 
 class ChannelTrimTests(unittest.TestCase):
@@ -1144,17 +1024,17 @@ class ChannelTrimTests(unittest.TestCase):
             "input_gain_linear": 0.9,
             "channel_trim": {"applied": True, "left_db": -2.0, "right_db": 0.0},
         }
-        controls = speaker_calibrate.graph_controls(fit, bass_enhancer=False)
+        controls = speaker_calibrate.graph_controls(fit)
         self.assertAlmostEqual(controls["bal_l:Mult"], 10 ** (-2.0 / 20.0), places=5)
         self.assertEqual(controls["bal_r:Mult"], 1.0)
         graph = speaker_calibrate.filter_config(
-            "alsa_output.x", fit, bass_enhancer=False
+            "alsa_output.x", fit
         )
         self.assertIn('name = bal_l label = linear control = { "Mult" = 0.7943', graph)
 
     def test_a_profile_without_a_trim_is_unity(self):
         controls = speaker_calibrate.graph_controls(
-            {"filters": [], "input_gain_linear": 1.0}, bass_enhancer=False
+            {"filters": [], "input_gain_linear": 1.0}
         )
         self.assertEqual(controls["bal_l:Mult"], 1.0)
         self.assertEqual(controls["bal_r:Mult"], 1.0)
@@ -1337,9 +1217,9 @@ class LoudnessCompensationTests(unittest.TestCase):
 
     def test_the_graph_always_carries_it_so_it_can_be_switched_live(self):
         fit = {"filters": [], "input_gain_linear": 1.0}
-        off = speaker_calibrate.graph_controls(fit, bass_enhancer=False)
+        off = speaker_calibrate.graph_controls(fit)
         on = speaker_calibrate.graph_controls(
-            fit, bass_enhancer=False, loudness_compensation=True, sink_volume_db=-12.0
+            fit, loudness_compensation=True, sink_volume_db=-12.0
         )
         self.assertEqual(set(off), set(on))
         self.assertEqual(off["loudcomp:enabled"], 0.0)
@@ -1354,7 +1234,7 @@ class LoudnessCompensationTests(unittest.TestCase):
         )
 
     def test_bypassing_the_calibration_also_flattens_it(self):
-        controls = speaker_calibrate.transparent_controls(bass_enhancer=False)
+        controls = speaker_calibrate.transparent_controls()
         self.assertEqual(controls["loudcomp:enabled"], 0.0)
         self.assertEqual(controls["loudcomp:input"], 1.0)
 
@@ -1633,42 +1513,6 @@ class CheckAndProfileLabelTests(unittest.TestCase):
                 )
 
 
-class PinnedBassEnhancerTests(unittest.TestCase):
-    root = Path(__file__).resolve().parents[1]
-
-    def test_the_pkgbuild_and_script_name_the_helper_s_revision(self):
-        pkgbuild = (self.root / "bass-enhancer" / "PKGBUILD").read_text()
-        script = (self.root / "bass-enhancer" / "install.sh").read_text()
-        commit = speaker_calibrate.BASS_ENHANCER_COMMIT
-        tree = speaker_calibrate.BASS_ENHANCER_TREE
-        version = speaker_calibrate.BASS_ENHANCER_VERSION
-        self.assertRegex(commit, r"^[0-9a-f]{40}$")
-        self.assertRegex(tree, r"^[0-9a-f]{40}$")
-        self.assertIn(f"_commit={commit}\n", pkgbuild)
-        self.assertIn("#commit=${_commit}", pkgbuild)
-        self.assertIn(f"pkgver={version}\n", pkgbuild)
-        self.assertRegex(pkgbuild, r"sha256sums=\('[0-9a-f]{64}'\)")
-        self.assertNotIn("SKIP", pkgbuild)
-        self.assertIn(f"COMMIT={commit}\n", script)
-        self.assertIn(f"TREE={tree}\n", script)
-        self.assertIn(f"VERSION={version}\n", script)
-
-    def test_nothing_that_runs_asks_the_aur_or_skips_confirmation(self):
-        for name in ("speaker-calibrate.py", "Panel.qml", "Service.qml",
-                     "bass-enhancer/install.sh", "bass-enhancer/PKGBUILD"):
-            text = (self.root / name).read_text()
-            for phrase in ("pkg aur", "--noconfirm", "yay", "aur.archlinux.org"):
-                self.assertNotIn(phrase, text, f"{phrase!r} in {name}")
-
-    def test_without_a_repository_the_shipped_script_is_the_install_command(self):
-        with mock.patch.object(speaker_calibrate, "package_repository", return_value=None):
-            command, repository = speaker_calibrate.bass_enhancer_install_command()
-        self.assertIsNone(repository)
-        self.assertEqual(command.split()[0], "/usr/bin/bash")
-        self.assertTrue(command.endswith("/bass-enhancer/install.sh"), command)
-        self.assertTrue((self.root / "bass-enhancer" / "install.sh").exists())
-
-
 class SharedCalibrationTests(unittest.TestCase):
     """Exporting a calibration and loading one that somebody shared."""
 
@@ -1764,7 +1608,7 @@ class SharedCalibrationTests(unittest.TestCase):
         self.assertIn("made on SLIMBOOK Executive; this is Dell Inc. XPS 14", result["warning"])
         self.assertEqual(result["proposal"]["speaker"]["name"], "alsa_output.pci-xps.analog-stereo")
         self.assertFalse(result["proposal"]["imported"]["matches"]["machine"])
-        self.assertEqual(result["proposal"]["deep_bass"], "off")
+        self.assertEqual(result["proposal"]["deep_bass"], "on")
         self.assertEqual(result["proposal"]["loudness_compensation"], "on")
 
     def test_hardware_matching_prefers_the_sku(self):
@@ -1945,7 +1789,7 @@ class VendorTuningTests(SharedCalibrationTests):
                        '{ output = "hb_cl_l:Out" input = "hb_mix_l:In 1" }', '{ output = "hb_fl_r:Out" input = "hb_mix_r:In 2" }',
                        '{ output = "hb_mix_l:Out" input = "s0_l:In" }', "own recipe, in built-in nodes"):
             self.assertIn(needle, chain, needle)
-        scale = speaker_calibrate.BANKSTOWN_SCALE * speaker_calibrate.BASS_ENHANCER_AMOUNT
+        scale = speaker_calibrate.HARMONIC_SCALE * speaker_calibrate.HARMONIC_AMOUNT
         self.assertIn(f'"Mult" = {2 * scale:.6f} "Add" = 0', chain)
         # No negative multiplier anywhere: PipeWire's linear node drops the sign.
         for line in chain.splitlines():
@@ -1983,7 +1827,6 @@ class InstallDefaultsTests(unittest.TestCase):
         patches = [
             mock.patch.object(speaker_calibrate, "install_profile", lambda profile, graph: "live"),
             mock.patch.object(speaker_calibrate, "filter_config", lambda *a, **k: "graph"),
-            mock.patch.object(speaker_calibrate, "bass_enhancer_status", lambda: {"usable": False}),
             mock.patch.object(speaker_calibrate, "sink_volume_db", lambda sink: 0.0),
             mock.patch.object(speaker_calibrate, "listening_sink", lambda profile: "sink"),
             mock.patch.object(speaker_calibrate, "start_loudness_tracker", lambda: calls.append("start")),

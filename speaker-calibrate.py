@@ -272,78 +272,10 @@ def pactl_json(kind):
     return json.loads(proc.stdout)
 
 
-def bass_enhancer_status():
-    """Whether the psychoacoustic bass add-on is installed and usable."""
-    for base in BASS_ENHANCER_SEARCH_PATHS:
-        directory = Path(base)
-        if not directory.is_dir():
-            continue
-        for bundle in sorted(directory.iterdir()):
-            if not bundle.is_dir():
-                continue
-            text = ""
-            for turtle in sorted(bundle.glob("*.ttl")):
-                try:
-                    # Installed by a package manager, so root owns it.
-                    chunk = read_text_bounded(
-                        turtle, MAX_DESCRIPTION_BYTES, errors="ignore",
-                        allow_root=True)
-                    text += chunk or ""
-                except (OSError, UnsafeFile):
-                    continue
-            if BASS_ENHANCER_URI not in text:
-                continue
-            missing = [
-                port for port in BASS_ENHANCER_PORTS
-                if f'lv2:symbol "{port}"' not in text
-            ]
-            return {
-                "available": not missing,
-                "installed": True,
-                "usable": not missing,
-                "package": BASS_ENHANCER_PACKAGE,
-                "path": str(bundle),
-                "missing_ports": missing,
-            }
-    return {
-        "available": False,
-        "installed": False,
-        "usable": False,
-        "package": BASS_ENHANCER_PACKAGE,
-        "path": None,
-        "missing_ports": [],
-    }
-
-
-def package_repository(package):
-    """The configured repository holding this package, or None for AUR-only."""
-    result = run(["pacman", "-Si", package], check=False, capture=True)
-    if result.returncode != 0:
-        return None
-    for line in result.stdout.splitlines():
-        if line.lower().startswith("repository"):
-            return line.split(":", 1)[1].strip()
-    return "unknown"
-
-
-def bass_enhancer_build_script():
-    """The build script shipped next to this file, with its pinned PKGBUILD."""
-    return Path(__file__).resolve().parent / BASS_ENHANCER_BUILD_DIR / "install.sh"
-
-
-def bass_enhancer_install_command():
-    """How to install the add-on: a plain package when a repository has it.
-
-    Omarchy's own repository may carry it one day, and a signed repository
-    package is preferable to a source build, so the repository is asked first
-    and the answer decides the command.  Otherwise it is built from one fixed
-    upstream revision by the PKGBUILD this plugin ships.  The AUR is never
-    consulted, so what gets built is what was reviewed with the plugin.
-    """
-    repository = package_repository(BASS_ENHANCER_PACKAGE)
-    if repository:
-        return f"omarchy pkg add {BASS_ENHANCER_PACKAGE}", repository
-    return shlex.join(["/usr/bin/bash", str(bass_enhancer_build_script())]), None
+def harmonic_bass_status():
+    """Deep bass is part of the graph: nothing to detect, nothing to install."""
+    return {"available": True, "installed": True, "usable": True, "builtin": True,
+            "package": None, "path": None, "missing_ports": []}
 
 
 LOUDNESS_UNIT_TEXT = """[Unit]
@@ -446,11 +378,9 @@ def loudness_toggle():
     if apply_controls_live(controls):
         method = "live"
         # Keep the graph on disk in step, so a restart keeps the setting.
-        enhancer = bass_enhancer_status()["usable"]
         write_atomic(FRAGMENT, filter_config(
             profile["speaker"]["name"], profile.get("fit") or {},
-            bass_enhancer=enhancer,
-            deep_bass=profile.get("deep_bass") == "on" and enhancer,
+            deep_bass=profile.get("deep_bass") == "on",
             loudness_compensation=wanted == "on",
             sink_volume_db=sink_volume_db(listening_sink(profile)),
         ))
@@ -468,55 +398,6 @@ def loudness_toggle():
         "method": method,
         "message": ("Loudness compensation on, following the volume"
                     if wanted == "on" else "Loudness compensation off"),
-    }
-
-
-def bass_enhancer_state():
-    """Add-on status, including where it would come from if it is missing.
-
-    Asking the package database costs a subprocess and only answers a question
-    that matters while nothing is installed, so it is skipped once it is.
-    """
-    status = bass_enhancer_status()
-    if status["installed"]:
-        return status
-    return {
-        **status,
-        "source": package_repository(BASS_ENHANCER_PACKAGE) or "pinned-source",
-        "pin": {"version": BASS_ENHANCER_VERSION, "commit": BASS_ENHANCER_COMMIT},
-    }
-
-
-def install_bass_enhancer():
-    """Start the add-on's installation in a terminal the user can watch."""
-    status = bass_enhancer_status()
-    if status["installed"]:
-        return {**status, "started": False,
-                "message": "The bass add-on is already installed."}
-    command, repository = bass_enhancer_install_command()
-    started = run(
-        ["omarchy", "launch", "floating", "terminal", "with", "presentation", command],
-        check=False,
-    ).returncode == 0
-    if not started:
-        raise SystemExit(
-            "Could not open a terminal for the installation. Run this yourself:\n"
-            f"  {command}"
-        )
-    return {
-        **status,
-        "started": True,
-        "command": command,
-        "source": repository or "pinned-source",
-        "pin": {"version": BASS_ENHANCER_VERSION, "commit": BASS_ENHANCER_COMMIT},
-        "message": (
-            f"Installing from the {repository} repository in a terminal window. "
-            "When it finishes, switch Deep bass on again."
-            if repository else
-            f"Building bankstown {BASS_ENHANCER_VERSION} from its pinned upstream "
-            "commit in a terminal window; pacman asks for your password there. "
-            "When it finishes, switch Deep bass on again."
-        ),
     }
 
 
@@ -650,38 +531,18 @@ def select(items, title, predicate=None):
 # biquad at 0 dB is unity.
 # The optional psychoacoustic bass add-on.  A small speaker cannot move enough
 # air to make a low note at all; this plays that note's harmonics instead and
-# the ear supplies the fundamental it never heard.  It is a separate package,
-# so the plugin works without it and only ever asks.
-BASS_ENHANCER_URI = "https://chadmed.au/bankstown"
-BASS_ENHANCER_PACKAGE = "bankstown"
-# The one upstream revision the add-on is built from when no repository
-# carries it: release 1.1.0, named by the full hash of its commit and of its
-# tree.  The PKGBUILD and the build script under BASS_ENHANCER_BUILD_DIR name
-# the same revision, and a test keeps the three in step.
-BASS_ENHANCER_VERSION = "1.1.0"
-BASS_ENHANCER_COMMIT = "e9829c9bccf5ed73768135c0ddd506f5a6690f9e"
-BASS_ENHANCER_TREE = "a8bbbb026af98053656283aed1801be3032c0876"
-BASS_ENHANCER_BUILD_DIR = "bass-enhancer"
-BASS_ENHANCER_SEARCH_PATHS = (
-    "/usr/lib/lv2", "/usr/local/lib/lv2", str(Path.home() / ".lv2"),
-)
-# Every port the generated graph refers to.  If the installed build does not
-# have all of them it is not the plugin this was written against, and it is
-# left out rather than risking a filter chain that will not load.
-BASS_ENHANCER_PORTS = (
-    "in_l", "in_r", "out_l", "out_r",
-    "bypass", "amt", "floor", "ceil", "final_hp", "sat_second", "sat_third", "blend",
-)
-# Settings from the Asahi Linux MacBook tunings, which use the same plugin on
-# speakers of much the same size.  The two frequency limits are not fixed:
-# they follow the measured knee, so the harmonics land where this speaker can
-# actually play them.  The plugin clamps them to 250 Hz.
-BASS_ENHANCER_AMOUNT = 1.45
-BASS_ENHANCER_SECOND = 1.3
-BASS_ENHANCER_THIRD = 1.75
-BASS_ENHANCER_BLEND = 1.0
-BASS_ENHANCER_FLOOR_HZ = 20.0
-BASS_ENHANCER_MAX_HZ = 250.0
+# the ear supplies the fundamental it never heard.  The recipe is bankstown's
+# (James Calligeros, MIT), written in PipeWire's built-in nodes, so nothing
+# has to be installed.
+HARMONIC_AMOUNT = 1.45
+HARMONIC_DRIVE = 1.75
+HARMONIC_FLOOR_HZ = 20.0
+HARMONIC_MAX_HZ = 250.0
+HARMONIC_SCALE = math.pi / (0.5 + math.e)   # bankstown scales its tanh by this
+NATURAL_BASE = math.e
+INVERSE_BASE = 1.0 / math.e
+# A new calibration has deep bass on; the switch turns it off.
+DEEP_BASS_DEFAULT = "on"
 
 # Volume-dependent loudness compensation.  The ear loses bass and, less so,
 # treble as the level drops, which is why quiet music sounds thin.  The LSP
@@ -851,28 +712,69 @@ def np_free_clip(value, low, high):
     return max(low, min(high, value))
 
 
-def bass_enhancer_controls(corner_hz, deep_bass):
-    """Controls for the bass add-on, tuned to where this speaker gives up."""
-    limit = float(min(BASS_ENHANCER_MAX_HZ, max(10.0, corner_hz)))
-    return {
-        "bass:bypass": 0.0 if deep_bass else 1.0,
-        "bass:amt": BASS_ENHANCER_AMOUNT if deep_bass else 0.0,
-        "bass:floor": BASS_ENHANCER_FLOOR_HZ,
-        # Harmonics are made from what lies below the knee and kept above it,
-        # which is the only place the speaker can reproduce them.
-        "bass:ceil": limit,
-        "bass:final_hp": limit,
-        "bass:sat_second": BASS_ENHANCER_SECOND,
-        "bass:sat_third": BASS_ENHANCER_THIRD,
-        "bass:blend": BASS_ENHANCER_BLEND,
-    }
+def harmonic_settings(corner_hz):
+    """Where the deep bass works, tuned to where this speaker gives up."""
+    limit = float(min(HARMONIC_MAX_HZ, max(10.0, corner_hz)))
+    # Harmonics are made from what lies below the knee and kept above it,
+    # which is the only place the speaker can reproduce them.
+    return {"floor_hz": HARMONIC_FLOOR_HZ, "ceil_hz": limit, "final_hp_hz": limit,
+            "drive": HARMONIC_DRIVE, "amount": HARMONIC_AMOUNT, "scale": HARMONIC_SCALE}
 
 
-def graph_controls(fit_payload, *, bass_enhancer=None, deep_bass=False,
+def harmonic_controls(corner_hz, deep_bass):
+    """The live controls of the deep-bass path, for both channels."""
+    h = harmonic_settings(corner_hz)
+    mult = 2.0 * h["scale"] * h["amount"] if deep_bass else 0.0
+    controls = {}
+    for side in ("l", "r"):
+        controls[f"hb_lp_{side}:Freq"] = h["ceil_hz"]
+        controls[f"hb_fh_{side}:Freq"] = h["final_hp_hz"]
+        controls[f"hb_fl_{side}:Freq"] = round(3.0 * h["ceil_hz"], 3)
+        controls[f"hb_out_{side}:Mult"] = round(mult, 6)
+    return controls
+
+
+def harmonic_nodes(side, settings, mult):
+    """The deep-bass path for one channel: node lines, links, and its ends.
+
+    bankstown's recipe in PipeWire built-ins: the band below the knee, then
+    k·amt·tanh(drive·x) written as 2·k·amt·s with s the logistic 1/(1+e^-2u)
+    (exp with base 1/e, +1, log, exp with base 1/e; the constant this adds is
+    removed by the path's own high-pass, and no multiplier is negative because
+    PipeWire's linear node drops the sign), then the harmonics' own band,
+    summed with the untouched signal.  ``mult`` is 2·k·amt with deep bass on
+    and 0 with it off: the one control that switches it live.
+    """
+    h = settings
+    specs = (
+        ("hb_in", "copy", None),
+        ("hb_cl", "clamp", '"Min" = -10 "Max" = 10'),
+        ("hb_hp", "bq_highpass", f'"Freq" = {_plain(h["floor_hz"])} "Q" = 0.707'),
+        ("hb_lp", "bq_lowpass", f'"Freq" = {_plain(h["ceil_hz"])} "Q" = 0.707'),
+        ("hb_g", "linear", f'"Mult" = {_plain(2.0 * h["drive"])} "Add" = 0'),
+        ("hb_e1", "exp", f'"Base" = {INVERSE_BASE:.9f}'),
+        ("hb_p1", "linear", '"Mult" = 1 "Add" = 1'),
+        ("hb_ln", "log", f'"Base" = {NATURAL_BASE:.9f} "M1" = 1 "M2" = 1'),
+        ("hb_e2", "exp", f'"Base" = {INVERSE_BASE:.9f}'),
+        ("hb_out", "linear", f'"Mult" = {float(mult):.6f} "Add" = 0'),
+        ("hb_fh", "bq_highpass", f'"Freq" = {_plain(h["final_hp_hz"])} "Q" = 0.707'),
+        ("hb_fl", "bq_lowpass", f'"Freq" = {_plain(3.0 * h["ceil_hz"])} "Q" = 0.707'),
+        ("hb_mix", "mixer", '"Gain 1" = 1 "Gain 2" = 1'),
+    )
+    nodes = [f'{{ type = builtin name = {name + "_" + side:<8} label = {label:<12}'
+             + (f' control = {{ {control} }}' if control else "") + " }"
+             for name, label, control in specs]
+    path = [name for name, _, _ in specs[:-1]]
+    links = [f'{{ output = "{before}_{side}:Out" input = "{after}_{side}:In" }}'
+             for before, after in zip(path, path[1:])]
+    links.append(f'{{ output = "hb_cl_{side}:Out" input = "hb_mix_{side}:In 1" }}')
+    links.append(f'{{ output = "hb_fl_{side}:Out" input = "hb_mix_{side}:In 2" }}')
+    return nodes, links, f"hb_in_{side}:In", f"hb_mix_{side}:Out"
+
+
+def graph_controls(fit_payload, *, deep_bass=False,
                    loudness_compensation=False, sink_volume_db=0.0):
     """Every control of the fixed-shape graph, for both channels, in order."""
-    if bass_enhancer is None:
-        bass_enhancer = bass_enhancer_status()["usable"]
     peaking, low_shelf, high_shelf, bass = fit_sections(fit_payload)
     if len(peaking) > PEAKING_SLOTS:
         raise ValueError(
@@ -900,8 +802,7 @@ def graph_controls(fit_payload, *, bass_enhancer=None, deep_bass=False,
         gain_db = float((fit_payload.get("channel_trim") or {}).get(f"{'left' if side == 'l' else 'right'}_db", 0.0))
         controls[f"bal_{side}:Mult"] = round(10.0 ** (gain_db / 20.0), 6)
         controls[f"bal_{side}:Add"] = 0.0
-    if bass_enhancer:
-        controls.update(bass_enhancer_controls(corner, deep_bass))
+    controls.update(harmonic_controls(corner, deep_bass))
     # Last, because the compensation's make-up rides on the limiter's input
     # gain and needs the calibrated value to build on.
     controls.update(loudness_controls(
@@ -913,14 +814,13 @@ def _number(value):
     return f"{float(value):.4f}".rstrip("0").rstrip(".") or "0"
 
 
-def filter_config(sink, fit_payload, *, bass_enhancer=None, deep_bass=False,
+def filter_config(sink, fit_payload, *, deep_bass=False,
                   loudness_compensation=False, sink_volume_db=0.0):
-    if bass_enhancer is None:
-        bass_enhancer = bass_enhancer_status()["usable"]
     controls = graph_controls(
-        fit_payload, bass_enhancer=bass_enhancer, deep_bass=deep_bass,
+        fit_payload, deep_bass=deep_bass,
         loudness_compensation=loudness_compensation, sink_volume_db=sink_volume_db,
     )
+    harmonic = harmonic_settings(highpass_settings(fit_payload)[0])
     nodes, links, inputs, outputs = [], [], [], []
     for side, port in (("l", "l"), ("r", "r")):
         chain = []
@@ -945,28 +845,18 @@ def filter_config(sink, fit_payload, *, bass_enhancer=None, deep_bass=False,
         # high-pass after it still throws away whatever the speaker cannot
         # play, so the lift only survives where it can be heard.
         links.append(f'{{ output = "loudcomp:out_{port}" input = "{chain[0]}:In" }}')
-        if bass_enhancer:
-            # The add-on has to see the low notes before anything takes them
-            # away, so it comes first and feeds the compensator.
-            links.append(f'{{ output = "bass:out_{port}" input = "loudcomp:in_{port}" }}')
-            inputs.append(f'"bass:in_{port}"')
-        else:
-            inputs.append(f'"loudcomp:in_{port}"')
+        # Deep bass has to see the low notes before anything takes them away,
+        # so its path comes first and feeds the compensator.
+        hb_nodes, hb_links, hb_input, hb_output = harmonic_nodes(
+            side, harmonic, controls[f"hb_out_{side}:Mult"])
+        nodes.extend(hb_nodes)
+        links.extend(hb_links)
+        links.append(f'{{ output = "{hb_output}" input = "loudcomp:in_{port}" }}')
+        inputs.append(f'"{hb_input}"')
         for before, after in zip(chain, chain[1:]):
             links.append(f'{{ output = "{before}:Out" input = "{after}:In" }}')
         links.append(f'{{ output = "{chain[-1]}:Out" input = "limiter:in_{port}" }}')
         outputs.append(f'"limiter:out_{port}"')
-    if bass_enhancer:
-        settings = " ".join(
-            f'"{name.split(":", 1)[1]}" = {_number(value)}'
-            for name, value in bass_enhancer_controls(
-                controls["bass:ceil"], controls["bass:bypass"] < 0.5
-            ).items()
-        )
-        nodes.insert(0, f'''{{ type = lv2 name = bass
-      plugin = "{BASS_ENHANCER_URI}"
-      control = {{ {settings} }}
-    }}''')
     loudness = " ".join(
         f'"{name.split(":", 1)[1]}" = {_number(value)}'
         for name, value in controls.items() if name.startswith("loudcomp:")
@@ -1073,7 +963,7 @@ def write_compare_state(state):
     write_atomic(COMPARE_STATE, json.dumps(state) + "\n")
 
 
-def transparent_controls(bass_enhancer=None, level_match_db=0.0):
+def transparent_controls(level_match_db=0.0):
     """Controls that make the running graph pass audio through unchanged.
 
     The high-pass sections drop to 10 Hz, every gain goes to 0 dB and the bass
@@ -1084,7 +974,7 @@ def transparent_controls(bass_enhancer=None, level_match_db=0.0):
     """
     controls = graph_controls(
         {"filters": [], "input_gain_linear": 10.0 ** (float(level_match_db) / 20.0)},
-        bass_enhancer=bass_enhancer, deep_bass=False,
+        deep_bass=False,
     )
     for name in list(controls):
         if name.startswith("hp") and name.endswith(":Freq"):
@@ -1213,16 +1103,15 @@ def activate_profile(profile):
     be live even if this one had to restart an older graph.
     """
     fit = profile.get("fit") or {}
-    enhancer = bass_enhancer_status()["usable"]
-    deep_bass = profile.get("deep_bass") == "on" and enhancer
+    deep_bass = profile.get("deep_bass") == "on"
     compensation = profile.get("loudness_compensation") == "on"
     volume = sink_volume_db(listening_sink(profile))
     controls = graph_controls(
-        fit, bass_enhancer=enhancer, deep_bass=deep_bass,
+        fit, deep_bass=deep_bass,
         loudness_compensation=compensation, sink_volume_db=volume,
     )
     graph = filter_config(
-        profile["speaker"]["name"], fit, bass_enhancer=enhancer, deep_bass=deep_bass,
+        profile["speaker"]["name"], fit, deep_bass=deep_bass,
         loudness_compensation=compensation, sink_volume_db=volume,
     )
     state = compare_state()
@@ -1267,10 +1156,11 @@ def added_sound_silenced():
     live = live_controls(node_id)
     running, quiet = {}, {}
 
-    enhancer = {name: value for name, value in live.items() if name.startswith("bass:")}
-    if enhancer and enhancer.get("bass:bypass", 1.0) < 0.5:
-        running.update(enhancer)
-        quiet.update({**enhancer, "bass:bypass": 1.0, "bass:amt": 0.0})
+    harmonics = {name: value for name, value in live.items()
+                 if name.startswith("hb_out_") and name.endswith(":Mult")}
+    if any(float(value) > 0.0 for value in harmonics.values()):
+        running.update(harmonics)
+        quiet.update({name: 0.0 for name in harmonics})
 
     compensation = {
         name: value for name, value in live.items() if name.startswith("loudcomp:")
@@ -1680,7 +1570,7 @@ def profile_from_measurement(
         "bass": bass,
         "channel_trim": channel_trim,
         # Carried across refits so switching voicing does not lose them.
-        "deep_bass": (load_profile(PROFILE) or {}).get("deep_bass", "off"),
+        "deep_bass": (load_profile(PROFILE) or {}).get("deep_bass", DEEP_BASS_DEFAULT),
         "loudness_compensation":
             (load_profile(PROFILE) or {}).get("loudness_compensation", LOUDNESS_COMPENSATION_DEFAULT),
         "safety": {
@@ -1992,12 +1882,11 @@ def install_proposal():
 def install_now(profile):
     if not profile.get("quality", {}).get("accepted") or not profile.get("fit"):
         raise SystemExit("This measurement failed its quality checks and cannot be installed.")
-    enhancer = bass_enhancer_status()["usable"]
     profile["activation"] = install_profile(
         profile,
         filter_config(
-            profile["speaker"]["name"], profile["fit"], bass_enhancer=enhancer,
-            deep_bass=profile.get("deep_bass") == "on" and enhancer,
+            profile["speaker"]["name"], profile["fit"],
+            deep_bass=profile.get("deep_bass") == "on",
             loudness_compensation=profile.get("loudness_compensation") == "on",
             sink_volume_db=sink_volume_db(listening_sink(profile)),
         ),
@@ -2037,15 +1926,8 @@ def load_verification():
 
 
 def deep_bass_toggle():
-    """Switch the bass add-on on or off, live, without refitting."""
-    status = bass_enhancer_status()
-    if not status["usable"]:
-        if status["installed"]:
-            raise SystemExit(
-                "The installed bass add-on is missing controls this expects "
-                f"({', '.join(status['missing_ports'])}), so it was left out."
-            )
-        return install_bass_enhancer()
+    """Switch deep bass on or off, live, without refitting."""
+    status = harmonic_bass_status()
     profile = load_profile(PROFILE)
     if profile is None:
         raise SystemExit("Calibrate the speakers first; there is nothing to add bass to.")
@@ -2651,7 +2533,7 @@ def import_profile(name=None, path=None):
         profile["speaker"] = local_speaker()
     # The switches are this machine's, not the exporter's.
     current = load_profile(PROFILE) or {}
-    profile["deep_bass"] = current.get("deep_bass", "off")
+    profile["deep_bass"] = current.get("deep_bass", DEEP_BASS_DEFAULT)
     profile["loudness_compensation"] = current.get("loudness_compensation", LOUDNESS_COMPENSATION_DEFAULT)
     profile["imported"] = {
         "file": source.name, "name": short_label(payload.get("name")),
@@ -2718,17 +2600,6 @@ def _plain(value):
     return f"{round(float(value), 3):g}"
 
 
-# The bass add-on's saturator scales tanh by this; blend 1.0 leaves only the
-# odd-symmetric branch, which is how this plugin runs it.
-BANKSTOWN_SCALE = math.pi / (0.5 + math.e)
-NATURAL_BASE = math.e
-# PipeWire's "linear" node does not honour a negative "Mult", so the tanh is
-# built without one: the logistic s = 1/(1 + e^-2u) from exp with base 1/e,
-# +1, log and exp with base 1/e again, then 2*k*amt*s, which is k*amt*tanh(u)
-# plus a constant that the path's own high-pass removes.
-INVERSE_BASE = 1.0 / math.e
-
-
 def vendor_harmonics(profile):
     """Deep bass for a chain without the add-on: bankstown's own recipe.
 
@@ -2739,15 +2610,9 @@ def vendor_harmonics(profile):
     PipeWire's built-in nodes and Omarchy can ship it without the add-on.
     Only when the profile has deep bass on; the numbers are the plugin's.
     """
-    if profile.get("deep_bass") != "on" or BASS_ENHANCER_BLEND < 1.0:
+    if profile.get("deep_bass") != "on":
         return None
-    corner = highpass_settings(profile["fit"])[0]
-    controls = bass_enhancer_controls(corner, True)
-    return {
-        "floor_hz": controls["bass:floor"], "ceil_hz": controls["bass:ceil"],
-        "final_hp_hz": controls["bass:final_hp"], "drive": BASS_ENHANCER_THIRD,
-        "amount": BASS_ENHANCER_AMOUNT, "scale": BANKSTOWN_SCALE,
-    }
+    return harmonic_settings(highpass_settings(profile["fit"])[0])
 
 
 def vendor_chain(sections, trim_db, input_gain, header, harmonics=None):
@@ -2756,35 +2621,10 @@ def vendor_chain(sections, trim_db, input_gain, header, harmonics=None):
     for side in ("l", "r"):
         names = []
         if harmonics:
-            # bankstown in built-ins: band-limit, then k·amt·tanh(drive·x) as
-            # 2·k·amt·s with s the logistic 1/(1+e^-2u) (exp with base 1/e,
-            # +1, log, exp with base 1/e), a constant the high-pass removes,
-            # then the harmonics' own band, summed with the untouched signal.
-            h = harmonics
-            gain = 2.0 * h["scale"] * h["amount"]
-            for name, label, control in (
-                ("hb_in", "copy", None),
-                ("hb_cl", "clamp", '"Min" = -10 "Max" = 10'),
-                ("hb_hp", "bq_highpass", f'"Freq" = {_plain(h["floor_hz"])} "Q" = 0.707'),
-                ("hb_lp", "bq_lowpass", f'"Freq" = {_plain(h["ceil_hz"])} "Q" = 0.707'),
-                ("hb_g", "linear", f'"Mult" = {_plain(2.0 * h["drive"])} "Add" = 0'),
-                ("hb_e1", "exp", f'"Base" = {INVERSE_BASE:.9f}'),
-                ("hb_p1", "linear", '"Mult" = 1 "Add" = 1'),
-                ("hb_ln", "log", f'"Base" = {NATURAL_BASE:.9f} "M1" = 1 "M2" = 1'),
-                ("hb_e2", "exp", f'"Base" = {INVERSE_BASE:.9f}'),
-                ("hb_out", "linear", f'"Mult" = {gain:.6f} "Add" = 0'),
-                ("hb_fh", "bq_highpass", f'"Freq" = {_plain(h["final_hp_hz"])} "Q" = 0.707'),
-                ("hb_fl", "bq_lowpass", f'"Freq" = {_plain(3.0 * h["ceil_hz"])} "Q" = 0.707'),
-                ("hb_mix", "mixer", '"Gain 1" = 1 "Gain 2" = 1'),
-            ):
-                full = f"{name}_{side}"
-                nodes.append(f'{{ type = builtin name = {full:<8} label = {label:<12}'
-                             + (f' control = {{ {control} }}' if control else "") + " }")
-            path = ["hb_in", "hb_cl", "hb_hp", "hb_lp", "hb_g", "hb_e1", "hb_p1", "hb_ln", "hb_e2", "hb_out", "hb_fh", "hb_fl"]
-            for before, after in zip(path, path[1:]):
-                links.append(f'{{ output = "{before}_{side}:Out" input = "{after}_{side}:In" }}')
-            links.append(f'{{ output = "hb_cl_{side}:Out" input = "hb_mix_{side}:In 1" }}')
-            links.append(f'{{ output = "hb_fl_{side}:Out" input = "hb_mix_{side}:In 2" }}')
+            hb_nodes, hb_links, _, _ = harmonic_nodes(
+                side, harmonics, 2.0 * harmonics["scale"] * harmonics["amount"])
+            nodes.extend(hb_nodes)
+            links.extend(hb_links)
             names.append(f"hb_mix_{side}")
         for index, (kind, frequency, q, gain) in enumerate(sections):
             name = f"s{index}_{side}"
@@ -3199,10 +3039,9 @@ def omarchy_audio_tuning(action, overlay=None):
 def reinstall_profile(profile):
     """Put the plugin's own files back and play the profile: what install does,
     without a new previous-profile slot, because nothing new was measured."""
-    enhancer = bass_enhancer_status()["usable"]
     graph = filter_config(
-        profile["speaker"]["name"], profile["fit"], bass_enhancer=enhancer,
-        deep_bass=profile.get("deep_bass") == "on" and enhancer,
+        profile["speaker"]["name"], profile["fit"],
+        deep_bass=profile.get("deep_bass") == "on",
         loudness_compensation=profile.get("loudness_compensation") == "on",
         sink_volume_db=sink_volume_db(listening_sink(profile)),
     )
@@ -3447,7 +3286,7 @@ def status_payload():
             "bypass": compare["bypass"],
             "compare": compare,
             "verification": load_verification(),
-            "bassEnhancer": bass_enhancer_state(),
+            "bassEnhancer": harmonic_bass_status(),
             "deepBass": (profile or {}).get("deep_bass", "off"),
             "previewing": previewing(),
             "loudnessCompensation": (profile or {}).get("loudness_compensation", "off"),
@@ -3623,7 +3462,7 @@ def main():
                  "devices-json", "install-proposal",
                  "disable", "compare-toggle", "bypass-toggle"):
         sub.add_parser(name)
-    for name in ("deep-bass-toggle", "install-bass-enhancer",
+    for name in ("deep-bass-toggle",
                  "install-measurement-support", "loudness-toggle"):
         sub.add_parser(name)
     sub.add_parser("verify-json")
@@ -3725,8 +3564,6 @@ def main():
         print(json.dumps(loudness_toggle()))
     elif command == "install-measurement-support":
         print(json.dumps(install_measurement_support()))
-    elif command == "install-bass-enhancer":
-        print(json.dumps(install_bass_enhancer()))
     elif command == "refine-json":
         profile = refine_from_check()
         print(json.dumps(install_if_accepted(profile) if args.install else profile))

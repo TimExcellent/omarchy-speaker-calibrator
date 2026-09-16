@@ -123,34 +123,10 @@ Panel {
 
   // One line under the Deep bass switch: what it is, or what pressing it does.
   function deepBassDescription() {
-    var addon = service.status.bassEnhancer || {}
-    if (addon.installed === true && addon.usable !== true)
-      return "The installed add-on is not the one this expects, so it is left out."
-    if (addon.usable !== true)
-      return "Your speakers are too small to make low notes at all. This plays their "
-        + "harmonics instead, and your ear fills in the note that is missing. "
-        + "It needs a small free add-on"
-        + (addon.source && addon.source !== "AUR" ? " from the " + addon.source + " repository" : "")
-        + "; press to install it."
     return service.status.deepBass === "on"
       ? "On. Low notes are suggested by their harmonics, which these speakers can play."
-      : "Off. Press to hear low notes suggested by their harmonics."
-  }
-  // Shown before anything is installed, and only when the package would be
-  // built from source rather than installed from a curated repository.
-  function bassWarningText() {
-    var addon = service.status.bassEnhancer || {}
-    if (addon.usable === true) return ""
-    if (addon.source && addon.source !== "pinned-source") return ""
-    var pin = addon.pin || {}
-    return "This add-on is not one of Omarchy's own packages. It is built from source "
-      + "on your machine, from one fixed upstream release that this plugin names by "
-      + "its exact commit (bankstown " + String(pin.version || "") + ", "
-      + String(pin.commit || "").slice(0, 12) + ") and checks before building; "
-      + "nothing is taken from the AUR. Building needs the Rust toolchain from "
-      + "Omarchy's own repositories, installed if it is missing, and pacman asks for "
-      + "your password in a terminal window. You can read the source first at "
-      + "github.com/chadmed/bankstown."
+      : "Off. Your speakers are too small to make low notes at all; on, this plays their "
+        + "harmonics instead and your ear fills in the note that is missing."
   }
   // "Recalibrate" says nothing about which microphone did the one in use.
   // Each row now carries its own history: whether it has measured at all,
@@ -1132,34 +1108,10 @@ Panel {
               label: "Deep bass"
               description: root.deepBassDescription()
               checked: service.status.deepBass === "on"
-                && ((service.status.bassEnhancer || {}).usable === true)
               enabled: !service.working
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: if (!service.busy) service.deepBass()
-            }
-
-            RowLayout {
-              visible: root.bassWarningText() !== ""
-              width: parent.width
-              spacing: Style.space(8)
-              Text {
-                textFormat: Text.PlainText
-                Layout.alignment: Qt.AlignTop
-                text: "󰀪"
-                color: bar ? bar.urgent : Color.urgent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.icon
-              }
-              Text {
-                textFormat: Text.PlainText
-                Layout.fillWidth: true
-                text: root.bassWarningText()
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
             }
 
             // Headphones or a speaker taking the default output is the
@@ -2193,15 +2145,9 @@ Panel {
               DetailRow {
                 width: parent.width
                 key: "Deep bass"
-                value: ((service.status.bassEnhancer || {}).usable === true)
-                  ? "bankstown add-on installed at " + String((service.status.bassEnhancer || {}).path)
-                    + "; makes harmonics from below the high-pass corner and keeps them above it"
-                  : "optional bankstown add-on, not installed; "
-                    + (((service.status.bassEnhancer || {}).source || "pinned-source") !== "pinned-source"
-                        ? "would come from the " + String((service.status.bassEnhancer || {}).source) + " repository"
-                        : "would be built from its pinned upstream commit")
-                    + "; nothing in the chain depends on it"
-              }
+                value: (service.status.deepBass === "on" ? "on" : "off")
+                  + "; built into the chain: what lies below the high-pass corner is saturated and its "
+                  + "harmonics between the corner and three times it are added back ahead of the EQ"
             }
           }
         }

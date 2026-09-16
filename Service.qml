@@ -435,7 +435,7 @@ Item {
             deepBass: bass.deep_bass !== undefined ? bass.deep_bass : root.status.deepBass
           })
           root.message = bass.message || ""
-          if (!bass.started) Qt.callLater(root.refreshStatus)
+          Qt.callLater(root.refreshStatus)
         } else if (root.phase === "loudness") {
           var loudness = JSON.parse(raw)
           root.status = Object.assign({}, root.status, {

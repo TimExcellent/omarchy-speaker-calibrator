@@ -366,6 +366,9 @@ Panel {
   }
   function heroMeta() {
     if (service.working) return service.message
+    if (service.status.vendorTrial === true)
+      return "Playing the exported Omarchy tuning through Omarchy's own installer: the plain "
+        + "chain, no add-ons. The calibration is stopped; Back to the calibration returns it."
     if (!service.status.enabled) {
       // The commonest reason is the simplest: the sound went somewhere else.
       if (service.status.profile && service.status.service === "active")
@@ -998,6 +1001,16 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
+          ActionRow {
+            visible: service.status.vendorTrial === true
+            width: parent.width
+            icon: "󰓦"
+            label: service.busy && service.phase === "vendorrestore" ? "Coming back…" : "Back to the calibration"
+            description: "Takes Omarchy's tuning off again and plays the calibration, with its add-ons"
+            enabled: !service.busy
+            onClicked: service.vendorRestore()
+          }
+
           Text {
             textFormat: Text.PlainText
             visible: !service.working && service.proposal !== null && service.proposal !== undefined
@@ -1610,6 +1623,33 @@ Panel {
                 + "default/audio/tunings, to your Downloads folder, ready for a pull request"
               enabled: !service.busy
               onClicked: service.exportVendor()
+            }
+            Text {
+              textFormat: Text.PlainText
+              visible: service.exportNote !== ""
+              width: parent.width
+              text: service.exportNote
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            ActionRow {
+              visible: service.status.vendorTrial === true
+                || (service.status.enabled && service.status.vendorExport !== undefined
+                    && service.status.vendorExport !== null)
+              width: parent.width
+              icon: "󰓦"
+              label: service.busy && service.phase === "vendortry" ? "Installing…"
+                : service.busy && service.phase === "vendorrestore" ? "Coming back…"
+                : service.status.vendorTrial === true ? "Back to the calibration"
+                : "Hear it as Omarchy would install it"
+              description: service.status.vendorTrial === true
+                ? "Omarchy's installer put the exported tuning on and the calibration is stopped; this returns it"
+                : "Renders the tuning again, stops the calibration, and installs it through Omarchy's own "
+                  + "omarchy audio tuning on: the plain chain, no add-ons, exactly what a user of the tuning gets"
+              enabled: !service.busy
+              onClicked: service.status.vendorTrial === true ? service.vendorRestore() : service.vendorTry()
             }
             Repeater {
               model: service.status.sharedProfiles || []

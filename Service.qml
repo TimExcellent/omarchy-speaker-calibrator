@@ -17,7 +17,10 @@ Item {
   // everything else (measuring, fitting, checking, installing, rendering)
   // takes long enough that the panel says so while it runs.
   readonly property var _quickPhases: ["relevel", "deepbass", "loudness", "bypass", "compare",
-                                        "status", "devices", "cache", "mics", "output"]
+                                        "status", "devices", "cache", "mics", "output",
+                                        "export", "vendor"]
+  // What the last export wrote and where, shown next to the buttons that did it.
+  property string exportNote: ""
   readonly property bool working: busy && _quickPhases.indexOf(phase) < 0
   // The proposal is reassigned only when its content changed, so the rows
   // drawn from it are not rebuilt for a refresh that brought the same thing.
@@ -57,6 +60,8 @@ Item {
       : operation === "relevel" ? "Switching…"
       : operation === "export" ? "Exporting the calibration…"
       : operation === "vendor" ? "Rendering the Omarchy tuning…"
+      : operation === "vendortry" ? "Installing the exported tuning through Omarchy's own installer…"
+      : operation === "vendorrestore" ? "Bringing the calibration back…"
       : operation === "import" ? "Loading the shared calibration…"
       : operation === "refit" ? "Applying…" : "Working…"
     _stdout = ""
@@ -192,6 +197,9 @@ Item {
   function exportProfile() { start("export", ["export-json"]) }
   // The same calibration in the layout Omarchy ships its own tunings in.
   function exportVendor() { start("vendor", ["vendor-tuning-json"]) }
+  // Hear the rendered tuning as Omarchy installs it, and come back.
+  function vendorTry() { start("vendortry", ["vendor-try-json"]) }
+  function vendorRestore() { start("vendorrestore", ["vendor-restore-json"]) }
   function importProfile(name) { start("import", ["import-json", "--file", String(name)]) }
   function disable() { start("disable", ["disable"]) }
   function compare() { start("compare", ["compare-toggle"]) }
@@ -381,11 +389,18 @@ Item {
           Qt.callLater(root.refreshStatus)
         } else if (root.phase === "export") {
           var exported = JSON.parse(raw)
-          root.message = exported.message || "Exported"
+          root.message = "Exported"
+          root.exportNote = exported.message || ""
           Qt.callLater(root.refreshStatus)
         } else if (root.phase === "vendor") {
           var rendered = JSON.parse(raw)
-          root.message = rendered.message || "Rendered"
+          root.message = "Rendered"
+          root.exportNote = rendered.message || ""
+          Qt.callLater(root.refreshStatus)
+        } else if (root.phase === "vendortry" || root.phase === "vendorrestore") {
+          var trial = JSON.parse(raw)
+          root.message = trial.message || ""
+          Qt.callLater(root.refreshStatus)
         } else if (root.phase === "import") {
           var loaded = JSON.parse(raw)
           root.setProposal(loaded.proposal || null)

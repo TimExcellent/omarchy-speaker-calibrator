@@ -365,7 +365,7 @@ Panel {
       + "down you play. The loudness stays the same either way; only the tone moves."
   }
   function heroMeta() {
-    if (service.busy) return service.message
+    if (service.working) return service.message
     if (!service.status.enabled) {
       // The commonest reason is the simplest: the sound went somewhere else.
       if (service.status.profile && service.status.service === "active")
@@ -619,7 +619,9 @@ Panel {
     implicitHeight: Math.max(Style.space(44), actionContent.implicitHeight + Style.space(16))
     color: Style.controlFill(false, _hot && enabled, root.foreground, Color.accent)
     borderSpec: Border.controlSpec(_hot && enabled ? "hover-cursor" : "normal", root.foreground, Color.accent)
-    opacity: enabled ? 1.0 : 0.55
+    // Disabled rows dim, except during a quick switch: a quarter of a second
+    // of dimming reads as a flicker, and the click is simply ignored then.
+    opacity: enabled || (service.busy && !service.working) ? 1.0 : 0.55
     Behavior on color { ColorAnimation { duration: 100 } }
 
     Row {
@@ -984,8 +986,11 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            visible: service.message !== "" && !service.busy
+            // Always present and at least one line tall, so a message coming
+            // and going never moves the rest of the panel: while something
+            // runs it says what, afterwards it says how it went.
             width: parent.width
+            height: Math.max(implicitHeight, Style.font.bodySmall * 1.45)
             text: service.message
             color: root.dim
             font.family: root.fontFamily
@@ -995,7 +1000,7 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            visible: !service.busy && service.proposal !== null && service.proposal !== undefined
+            visible: !service.working && service.proposal !== null && service.proposal !== undefined
               && service.proposal.quality !== undefined && service.proposal.quality.accepted === false
             width: parent.width
             text: root.qualityIssuesText() + (root.qualityGuidanceText() !== "" ? "\n" + root.qualityGuidanceText() : "")
@@ -1007,7 +1012,7 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            visible: !service.busy && service.status.verification !== undefined
+            visible: !service.working && service.status.verification !== undefined
               && service.status.verification !== null
             width: parent.width
             text: service.status.verification && service.status.verification.stale
@@ -1033,10 +1038,11 @@ Panel {
               label: "Loudness"
               description: "Fuller sound with more bass, like the loudness button on a stereo."
               checked: root.bassMode === "full"
-              enabled: !service.busy
+              enabled: !service.working
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: {
+                if (service.busy) return
                 root.bassMode = root.bassMode === "full" ? "normal" : "full"
                 root.applyOptions()
               }
@@ -1047,10 +1053,11 @@ Panel {
               label: "Make it louder"
               description: "Gives back the volume the correction takes away. At full volume the limiter works harder."
               checked: root.loudnessMode !== "protected"
-              enabled: !service.busy
+              enabled: !service.working
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: {
+                if (service.busy) return
                 root.loudnessMode = root.loudnessMode === "protected" ? "matched" : "protected"
                 root.applyOptions()
               }
@@ -1062,10 +1069,10 @@ Panel {
               description: root.deepBassDescription()
               checked: service.status.deepBass === "on"
                 && ((service.status.bassEnhancer || {}).usable === true)
-              enabled: !service.busy
+              enabled: !service.working
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onClicked: service.deepBass()
+              onClicked: if (!service.busy) service.deepBass()
             }
 
             RowLayout {
@@ -1134,10 +1141,10 @@ Panel {
                 ? "Off — the plain speakers" + root.bypassMatchText()
                 : "On — switch off to hear the speakers as they were" + root.bypassMatchText()
               checked: !service.status.bypass
-              enabled: !service.busy
+              enabled: !service.working
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onClicked: service.bypass()
+              onClicked: if (!service.busy) service.bypass()
             }
 
             Column {
@@ -1475,10 +1482,10 @@ Panel {
               label: "Loudness compensation"
               description: root.loudnessCompensationDescription()
               checked: service.status.loudnessCompensation === "on"
-              enabled: !service.busy && service.status.enabled
+              enabled: !service.working && service.status.enabled
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onClicked: service.loudnessCompensation()
+              onClicked: if (!service.busy) service.loudnessCompensation()
             }
 
             Text {

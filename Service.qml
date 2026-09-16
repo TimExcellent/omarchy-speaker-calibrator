@@ -12,6 +12,23 @@ Item {
   // curves, which have no business in every status refresh.
   property var micComparison: null
   property bool busy: process.running
+  // A switch that lands in a fraction of a second is not a wait, and the
+  // panel should not collapse or dim for it.  These are the quick phases;
+  // everything else (measuring, fitting, checking, installing, rendering)
+  // takes long enough that the panel says so while it runs.
+  readonly property var _quickPhases: ["relevel", "deepbass", "loudness", "bypass", "compare",
+                                        "status", "devices", "cache", "mics", "output"]
+  readonly property bool working: busy && _quickPhases.indexOf(phase) < 0
+  // The proposal is reassigned only when its content changed, so the rows
+  // drawn from it are not rebuilt for a refresh that brought the same thing.
+  property string _proposalKey: ""
+  function setProposal(next) {
+    var value = (next === undefined) ? null : next
+    var key = JSON.stringify(value)
+    if (key === _proposalKey) return
+    _proposalKey = key
+    proposal = value
+  }
   property string phase: ""
   property string error: ""
   property string message: ""
@@ -106,7 +123,7 @@ Item {
       var payload = JSON.parse(String(raw || ""))
       if (!payload || !payload.service) return false
       status = payload
-      proposal = payload.proposal || null
+      setProposal(payload.proposal || null)
       return true
     } catch (exception) {
       return false
@@ -149,7 +166,7 @@ Item {
   // Measure; with install=true the result is installed and played as soon as
   // it passes, so one press does the whole job.
   function measure(sink, mic, channel, options, install) {
-    proposal = null
+    setProposal(null)
     var arguments = ["calibrate-json", "--sink", sink, "--mic", mic,
                      "--channel", String(channel)].concat(optionArguments(options))
     if (options.micCalibrationFile && options.micCalibrationFile.length > 0)
@@ -319,7 +336,7 @@ Item {
         if (root.phase === "status") {
           var statusPayload = JSON.parse(raw)
           root.status = statusPayload
-          root.proposal = statusPayload.proposal || null
+          root.setProposal(statusPayload.proposal || null)
           // A background refresh has nothing to report; leaving "Working…" on
           // screen makes an idle panel look busy.
           if (root.message === "Working…") root.message = ""
@@ -329,7 +346,7 @@ Item {
           // is on screen no longer describes what is stored.
           if (root.micComparison) root._micsPending = true
           var result = JSON.parse(raw)
-          root.proposal = result
+          root.setProposal(result)
           var accepted = result.quality && result.quality.accepted
           if (accepted && result.installed) {
             root.status = Object.assign({}, root.status, { enabled: true, profile: result, bypass: false })
@@ -359,7 +376,7 @@ Item {
         } else if (root.phase === "relevel") {
           var levelled = JSON.parse(raw)
           root.status = Object.assign({}, root.status, { profile: levelled.profile, bypass: false })
-          if (levelled.proposal) root.proposal = levelled.proposal
+          if (levelled.proposal) root.setProposal(levelled.proposal)
           root.message = levelled.message || ""
           Qt.callLater(root.refreshStatus)
         } else if (root.phase === "export") {
@@ -371,7 +388,7 @@ Item {
           root.message = rendered.message || "Rendered"
         } else if (root.phase === "import") {
           var loaded = JSON.parse(raw)
-          root.proposal = loaded.proposal || null
+          root.setProposal(loaded.proposal || null)
           root.message = loaded.message || "Loaded"
           Qt.callLater(root.refreshStatus)
         } else if (root.phase === "compare") {

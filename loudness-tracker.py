@@ -33,6 +33,11 @@ import sys
 import time
 from pathlib import Path
 
+# Loading the helper compiles it, and the bytecode must not land in the plugin
+# directory: Omarchy's shell reloads the plugin on any change there. Same rule,
+# same place as in the helper itself.
+sys.dont_write_bytecode = True
+
 HELPER = Path(__file__).resolve().parent / "speaker-calibrate.py"
 # Below this the change is inaudible and not worth a round of control writes.
 VOLUME_EPSILON_DB = 0.4

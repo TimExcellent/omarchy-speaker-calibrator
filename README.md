@@ -43,13 +43,21 @@ Middle-click the bar icon to re-scan for devices. If a measurement fails a
 quality gate it is kept for diagnosis but never installed, so a bad
 measurement cannot make your speakers worse.
 
+In Omarchy's sound menu and output switcher the calibration is the output
+called **Calibrated Speakers**; keep that one selected. The raw speaker device
+stays listed next to it, because Omarchy hides the hardware only behind its own
+laptop tunings ([omacom/omarchy#12191](https://github.com/omacom/omarchy/issues/12191)
+asks for the same treatment of this sink). Selecting the raw device plays
+around the calibration, and so does an application that switches the default
+output on its own.
+
 ### The four switches
 
 | Switch | What it does |
 | --- | --- |
 | **Loudness** | Fuller sound with more bass, like the loudness button on a stereo. |
 | **Make it louder** | Gives back the volume the correction takes away. The limiter works harder at full volume. |
-| **Deep bass** | Suggests low notes the speakers cannot physically play, using their harmonics. Needs one optional package. |
+| **Deep bass** | Suggests low notes the speakers cannot physically play, using their harmonics. |
 | **Calibration** | Switch it off to hear the plain speakers, level-matched so only the tone changes. |
 
 Everything else lives under **Advanced**: voicing, the three loudness levels,

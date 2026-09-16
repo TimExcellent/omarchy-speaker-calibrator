@@ -339,7 +339,15 @@ class CalibrationOptimizerTests(unittest.TestCase):
         self.assertIn('"Freq" = 1000 "Q" = 1 "Gain" = -2.5', graph)
         self.assertIn('"Freq" = 2500 "Q" = 1.2 "Gain" = 0.75', graph)
         self.assertIn('"g_in" = 0.812345', graph)
-        self.assertIn('Calibrated Speakers — Protected', graph)
+        # One ASCII name everywhere: pactl's JSON output renders any non-ASCII
+        # string as "(null)", which Omarchy's switcher then shows (issue #1).
+        self.assertTrue(graph.isascii())
+        self.assertIn('node.description = "Calibrated Speakers"', graph)
+        self.assertIn('media.name = "Calibrated Speakers"', graph)
+        capture = graph[graph.index("capture.props"):graph.index("playback.props")]
+        self.assertIn('node.nick = "Calibrated Speakers"', capture)
+        self.assertIn('node.description = "Calibrated Speakers"', capture)
+        self.assertNotIn("Protected", graph)
         # The graph keeps its full fixed shape so profiles can be applied live.
         self.assertIn('name = p12_l label = bq_peaking', graph)
         self.assertIn('name = ls_r label = bq_lowshelf', graph)
@@ -1974,6 +1982,80 @@ class VendorTrialTests(unittest.TestCase):
         # Rebuilt from scratch on every trial.
         speaker_calibrate.build_vendor_overlay({**rendered, "slug": "other-machine"})
         self.assertEqual(sorted(p.name for p in tunings.iterdir()), ["other-machine"])
+
+
+
+class FakeRecorder:
+    """Stands in for the pw-record Popen object."""
+
+    def __init__(self, *, hangs=False):
+        self.signals = []
+        self.killed = False
+        self.hangs = hangs
+        self.waits = 0
+
+    def poll(self):
+        return None if not self.signals and not self.killed else 0
+
+    def send_signal(self, signum):
+        self.signals.append(signum)
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        self.waits += 1
+        if self.hangs and not self.killed:
+            raise subprocess.TimeoutExpired("pw-record", timeout)
+        return 0
+
+
+class PluginDirectoryHygieneTests(unittest.TestCase):
+    """The helper must never write into the plugin directory (issue #2)."""
+
+    def test_importing_the_helper_switches_bytecode_writing_off(self):
+        self.assertTrue(sys.dont_write_bytecode)
+        source = Path(speaker_calibrate.__file__).read_text()
+        self.assertLess(source.index("sys.dont_write_bytecode = True"),
+                        source.index("from calibration_io import"))
+
+    def test_tracker_does_the_same_before_loading_the_helper(self):
+        source = (Path(speaker_calibrate.__file__).parent / "loudness-tracker.py").read_text()
+        self.assertLess(source.index("sys.dont_write_bytecode = True"), source.index("HELPER ="))
+
+
+class RecorderCleanupTests(unittest.TestCase):
+    """A cancelled or failed measurement leaves no pw-record behind (issue #1)."""
+
+    def test_playback_failure_still_stops_the_recorder(self):
+        recorder = FakeRecorder()
+        with mock.patch.object(speaker_calibrate.subprocess, "Popen", return_value=recorder) as popen, \
+                mock.patch.object(speaker_calibrate, "run", side_effect=subprocess.CalledProcessError(1, "pw-play")), \
+                mock.patch.object(speaker_calibrate.time, "sleep"):
+            with self.assertRaises(subprocess.CalledProcessError):
+                speaker_calibrate.record_while_playing(
+                    "alsa_output.synthetic", "mic", 1, Path("/tmp/p.wav"), Path("/tmp/r.wav"), 0, 0)
+        self.assertEqual(recorder.signals, [speaker_calibrate.signal.SIGINT])
+        self.assertEqual(recorder.waits, 1)
+        # The recorder is told to follow the helper if the helper is killed outright.
+        self.assertIs(popen.call_args.kwargs["preexec_fn"], speaker_calibrate.die_with_parent)
+
+    def test_a_recorder_that_ignores_sigint_is_killed(self):
+        recorder = FakeRecorder(hangs=True)
+        speaker_calibrate.stop_recorder(recorder)
+        self.assertEqual(recorder.signals, [speaker_calibrate.signal.SIGINT])
+        self.assertTrue(recorder.killed)
+
+    def test_an_already_finished_recorder_is_not_signalled(self):
+        recorder = FakeRecorder()
+        recorder.killed = True  # poll() reports it gone
+        speaker_calibrate.stop_recorder(recorder)
+        self.assertEqual(recorder.signals, [])
+
+    def test_sigterm_becomes_a_normal_exit(self):
+        with self.assertRaises(SystemExit) as caught:
+            speaker_calibrate.exit_on_terminate(speaker_calibrate.signal.SIGTERM, None)
+        self.assertEqual(caught.exception.code, 143)
 
 
 if __name__ == "__main__":

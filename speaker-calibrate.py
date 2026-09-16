@@ -2722,6 +2722,11 @@ def _plain(value):
 # odd-symmetric branch, which is how this plugin runs it.
 BANKSTOWN_SCALE = math.pi / (0.5 + math.e)
 NATURAL_BASE = math.e
+# PipeWire's "linear" node does not honour a negative "Mult", so the tanh is
+# built without one: the logistic s = 1/(1 + e^-2u) from exp with base 1/e,
+# +1, log and exp with base 1/e again, then 2*k*amt*s, which is k*amt*tanh(u)
+# plus a constant that the path's own high-pass removes.
+INVERSE_BASE = 1.0 / math.e
 
 
 def vendor_harmonics(profile):
@@ -2751,23 +2756,23 @@ def vendor_chain(sections, trim_db, input_gain, header, harmonics=None):
     for side in ("l", "r"):
         names = []
         if harmonics:
-            # bankstown in built-ins: band-limit, k·amt·tanh(drive·x) as
-            # 1 - 2/(e^(2u)+1) with the division done as exp(-log), then the
-            # harmonics' own band, summed with the untouched signal.
+            # bankstown in built-ins: band-limit, then k·amt·tanh(drive·x) as
+            # 2·k·amt·s with s the logistic 1/(1+e^-2u) (exp with base 1/e,
+            # +1, log, exp with base 1/e), a constant the high-pass removes,
+            # then the harmonics' own band, summed with the untouched signal.
             h = harmonics
-            gain, offset = -2.0 * h["scale"] * h["amount"], h["scale"] * h["amount"]
+            gain = 2.0 * h["scale"] * h["amount"]
             for name, label, control in (
                 ("hb_in", "copy", None),
                 ("hb_cl", "clamp", '"Min" = -10 "Max" = 10'),
                 ("hb_hp", "bq_highpass", f'"Freq" = {_plain(h["floor_hz"])} "Q" = 0.707'),
                 ("hb_lp", "bq_lowpass", f'"Freq" = {_plain(h["ceil_hz"])} "Q" = 0.707'),
                 ("hb_g", "linear", f'"Mult" = {_plain(2.0 * h["drive"])} "Add" = 0'),
-                ("hb_e1", "exp", f'"Base" = {NATURAL_BASE:.9f}'),
+                ("hb_e1", "exp", f'"Base" = {INVERSE_BASE:.9f}'),
                 ("hb_p1", "linear", '"Mult" = 1 "Add" = 1'),
                 ("hb_ln", "log", f'"Base" = {NATURAL_BASE:.9f} "M1" = 1 "M2" = 1'),
-                ("hb_ng", "linear", '"Mult" = -1 "Add" = 0'),
-                ("hb_e2", "exp", f'"Base" = {NATURAL_BASE:.9f}'),
-                ("hb_out", "linear", f'"Mult" = {gain:.6f} "Add" = {offset:.6f}'),
+                ("hb_e2", "exp", f'"Base" = {INVERSE_BASE:.9f}'),
+                ("hb_out", "linear", f'"Mult" = {gain:.6f} "Add" = 0'),
                 ("hb_fh", "bq_highpass", f'"Freq" = {_plain(h["final_hp_hz"])} "Q" = 0.707'),
                 ("hb_fl", "bq_lowpass", f'"Freq" = {_plain(3.0 * h["ceil_hz"])} "Q" = 0.707'),
                 ("hb_mix", "mixer", '"Gain 1" = 1 "Gain 2" = 1'),
@@ -2775,7 +2780,7 @@ def vendor_chain(sections, trim_db, input_gain, header, harmonics=None):
                 full = f"{name}_{side}"
                 nodes.append(f'{{ type = builtin name = {full:<8} label = {label:<12}'
                              + (f' control = {{ {control} }}' if control else "") + " }")
-            path = ["hb_in", "hb_cl", "hb_hp", "hb_lp", "hb_g", "hb_e1", "hb_p1", "hb_ln", "hb_ng", "hb_e2", "hb_out", "hb_fh", "hb_fl"]
+            path = ["hb_in", "hb_cl", "hb_hp", "hb_lp", "hb_g", "hb_e1", "hb_p1", "hb_ln", "hb_e2", "hb_out", "hb_fh", "hb_fl"]
             for before, after in zip(path, path[1:]):
                 links.append(f'{{ output = "{before}_{side}:Out" input = "{after}_{side}:In" }}')
             links.append(f'{{ output = "hb_cl_{side}:Out" input = "hb_mix_{side}:In 1" }}')
@@ -2981,9 +2986,10 @@ def render_vendor_tuning(reference=None):
 # The hb_* nodes ahead of the EQ are deep bass: what lies below the knee
 # ({harmonics["ceil_hz"]:.0f} Hz), which these drivers cannot play, is saturated
 # ({harmonics["scale"]:.3f} * {harmonics["amount"]} * tanh({harmonics["drive"]} * x), the tanh written as
-# 1 - 2/(e^2u + 1) with exp and log) and its harmonics between the knee and
-# three times the knee are added back, so the ear hears the note the speaker
-# never made. It is the bankstown add-on's own recipe, in built-in nodes.'''
+# 2/(1 + e^-2u) with exp and log, less a constant the high-pass removes) and
+# its harmonics between the knee and three times the knee are added back, so
+# the ear hears the note the speaker never made. It is the bankstown add-on's
+# own recipe, in built-in nodes, verified against it to 0.1 dB.'''
     chain = vendor_chain(sections, trim_db, input_gain, header, harmonics)
     match_line = (f'match_sku=("{sku}")' if sku
                   else f'match_dmi=("{hardware.get("product_name", "")}")   ## no DMI SKU on this machine; substring of the product name')

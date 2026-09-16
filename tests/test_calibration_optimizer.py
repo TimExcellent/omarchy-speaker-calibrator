@@ -1939,20 +1939,24 @@ class VendorTuningTests(SharedCalibrationTests):
         for needle in ('name = hb_in_l  label = copy', 'name = hb_cl_l  label = clamp        control = { "Min" = -10 "Max" = 10 }',
                        'label = bq_lowpass   control = { "Freq" = 190 "Q" = 0.707 }',   # ceil at the knee
                        'label = bq_lowpass   control = { "Freq" = 570 "Q" = 0.707 }',   # three times the knee
-                       '"Mult" = 3.5 "Add" = 0', 'label = exp          control = { "Base" = 2.718281828 }',
+                       '"Mult" = 3.5 "Add" = 0', 'label = exp          control = { "Base" = 0.367879441 }',
                        'label = log          control = { "Base" = 2.718281828 "M1" = 1 "M2" = 1 }',
                        'inputs  = [ "hb_in_l:In" "hb_in_r:In" ]',
                        '{ output = "hb_cl_l:Out" input = "hb_mix_l:In 1" }', '{ output = "hb_fl_r:Out" input = "hb_mix_r:In 2" }',
-                       '{ output = "hb_mix_l:Out" input = "s0_l:In" }', "bankstown add-on's own recipe"):
+                       '{ output = "hb_mix_l:Out" input = "s0_l:In" }', "own recipe, in built-in nodes"):
             self.assertIn(needle, chain, needle)
         scale = speaker_calibrate.BANKSTOWN_SCALE * speaker_calibrate.BASS_ENHANCER_AMOUNT
-        self.assertIn(f'"Mult" = {-2 * scale:.6f} "Add" = {scale:.6f}', chain)
+        self.assertIn(f'"Mult" = {2 * scale:.6f} "Add" = 0', chain)
+        # No negative multiplier anywhere: PipeWire's linear node drops the sign.
+        for line in chain.splitlines():
+            if "label = linear" in line:
+                self.assertNotIn('"Mult" = -', line, line)
+        # The node chain's arithmetic is a tanh plus a constant: 2 s - 1 == tanh(u).
+        u = np.linspace(-17.0, 17.0, 2001)
+        s = np.exp(-np.log(1.0 + np.exp(-2.0 * u)))
+        self.assertLess(float(np.max(np.abs(2.0 * s - 1.0 - np.tanh(u)))), 1e-6)
         tuning = (Path(result["directory"]) / "tuning.conf").read_text()
         self.assertIn("Deep bass is included", tuning)
-        # The node chain's arithmetic is a tanh: 1 - 2 * exp(-log(exp(2u) + 1)).
-        u = np.linspace(-17.0, 17.0, 2001)
-        via_nodes = 1.0 - 2.0 * np.exp(-np.log(np.exp(2.0 * u) + 1.0))
-        self.assertLess(float(np.max(np.abs(via_nodes - np.tanh(u)))), 1e-6)
 
     def test_metrics_come_from_a_simulated_pass_through_the_chain(self):
         sections = speaker_calibrate.vendor_sections(self.profile()["fit"])

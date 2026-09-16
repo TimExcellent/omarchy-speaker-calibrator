@@ -1873,5 +1873,72 @@ class LevelVariantTests(CalibrationOptimizerTests):
         self.assertEqual(profile["safety"]["makeup_gain_db"], 0.0)
 
 
+class VendorTuningTests(SharedCalibrationTests):
+    """A calibration rendered as an Omarchy vendor tuning."""
+
+    def test_coefficients_agree_with_the_magnitude_responses(self):
+        from calibration_optimizer import (chain_response, group_delay_swing_ms, _peaking_response_db,
+                                           _lowshelf_response_db, _highshelf_response_db, _highpass_response_db)
+        f = np.geomspace(20.0, 20000.0, 300)
+        for kind, freq, q, gain, reference in (
+            ("peaking", 600.0, 2.6, -8.5, _peaking_response_db(f, 600.0, 2.6, -8.5, 48000)),
+            ("lowshelf", 200.0, 0.707, 3.0, _lowshelf_response_db(f, 200.0, 0.707, 3.0, 48000)),
+            ("highshelf", 6000.0, 1.5, -1.3, _highshelf_response_db(f, 6000.0, 1.5, -1.3, 48000)),
+            ("highpass", 190.0, 0.707, 0.0, _highpass_response_db(f, 190.0, 0.707, 48000)),
+        ):
+            magnitude = 20.0 * np.log10(np.abs(chain_response([(kind, freq, q, gain)], f, 48000)))
+            self.assertLess(float(np.max(np.abs(magnitude - reference))), 1e-6, kind)
+        self.assertEqual(group_delay_swing_ms([], 48000), 0.0)
+        swing = group_delay_swing_ms([("highpass", 60.9, 1.0, 0.0)] * 2 + [("peaking", 83.4, 1.8, -8.0)], 48000)
+        self.assertGreater(swing, 1.0)
+        self.assertLess(swing, 30.0)
+
+    def test_sections_follow_omarchy_s_order_and_drop_idle_ones(self):
+        fit = self.profile()["fit"]
+        fit["filters"].append({"type": "peaking", "frequency_hz": 300.0, "q": 1.0, "gain_db": 0.0})
+        fit["filters"].append({"type": "highshelf", "frequency_hz": 8000.0, "q": 0.7, "gain_db": -2.0})
+        fit["highpass"]["stages"] = 2
+        sections = speaker_calibrate.vendor_sections(fit)
+        self.assertEqual([kind for kind, *_ in sections],
+                         ["highpass", "highpass", "lowshelf", "peaking", "peaking", "highshelf"])
+        self.assertEqual([round(freq) for _, freq, *_ in sections], [190, 190, 200, 600, 2500, 8000])
+
+    def test_the_rendered_tuning_has_what_omarchy_checks_for(self):
+        self.install_active()
+        fake_metrics = {"bass_group_delay_swing_ms": 2.5, "limiter_headroom_db": 1.2, "peak_dbfs": -2.2,
+                        "dynamic_range_delta_lu": 0.3, "signal": "pink noise"}
+        with mock.patch.object(speaker_calibrate, "vendor_metrics", lambda *a, **k: fake_metrics):
+            result = speaker_calibrate.vendor_tuning()
+        folder = Path(result["directory"])
+        self.assertEqual(folder, self.downloads / "omarchy-tuning-slimbook-executive")
+        self.assertEqual(sorted(result["files"]), ["README.txt", "filter-chain.conf", "tuning.conf"])
+        chain = (folder / "filter-chain.conf").read_text()
+        for needle in ('name = s0_l', 'name = s0_r', 'label = bq_highpass', 'label = bq_lowshelf', 'label = bq_peaking',
+                       'name   = limiter', '"alr"   = 0', '"boost" = 0', '"g_in"  = 0.8000', '"th"    = 0.891',
+                       'node.name   = "omarchy_speaker_tuning"', 'target.object = "@SPEAKER_SINK@"',
+                       'node.dont-move = true', 'node.dont-fallback = true', 'inputs  = [ "s0_l:In" "s0_r:In" ]',
+                       'outputs = [ "limiter:out_l" "limiter:out_r" ]', '{ output = "s3_l:Out" input = "limiter:in_l" }'):
+            self.assertIn(needle, chain, needle)
+        self.assertNotIn("bankstown", chain)
+        self.assertNotIn("loud_comp", chain)
+        tuning = (folder / "tuning.conf").read_text()
+        for needle in ('match_sku=("EXE14")', "sink_pattern='^alsa_output\\.pci-test\\.analog-stereo$'",
+                       'description="SLIMBOOK Executive speakers"', 'bass_group_delay_swing_ms="2.5"',
+                       'limiter_headroom_db="1.2"', 'dynamic_range_delta_lu="0.3"', 'validated_by=""',
+                       'derived_from="Omarchy Speaker Calibrator'):
+            self.assertIn(needle, tuning, needle)
+
+    def test_metrics_come_from_a_simulated_pass_through_the_chain(self):
+        sections = speaker_calibrate.vendor_sections(self.profile()["fit"])
+        with mock.patch.object(speaker_calibrate, "VENDOR_SIMULATION_SECONDS", 2.0):
+            metrics = speaker_calibrate.vendor_metrics(sections, 0.8, 48000)
+        self.assertGreater(metrics["bass_group_delay_swing_ms"], 0.0)
+        self.assertLess(metrics["peak_dbfs"], 0.0)
+        self.assertAlmostEqual(metrics["limiter_headroom_db"], -1.0 - metrics["peak_dbfs"], places=1)
+        self.assertIn("pink noise", metrics["signal"])
+        if metrics["dynamic_range_delta_lu"] is not None:
+            self.assertLess(abs(metrics["dynamic_range_delta_lu"]), 10.0)
+
+
 if __name__ == "__main__":
     unittest.main()

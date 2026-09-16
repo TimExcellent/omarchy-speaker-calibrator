@@ -2365,7 +2365,7 @@ def hardware_matches(theirs, ours):
     return key(theirs) == key(ours)
 
 
-def write_shared(name, text):
+def write_shared(name, text, subdirectory=None):
     """Publish a shareable file in Downloads without touching the folder itself.
 
     ``write_atomic`` tightens its directory to 0700, which is right for the
@@ -2376,7 +2376,7 @@ def write_shared(name, text):
     """
     directory = share_directory()
     if directory == DATA / "shared":
-        destination = directory / name
+        destination = directory / subdirectory / name if subdirectory else directory / name
         write_atomic(destination, text, mode=0o644)
         return destination
     dfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -2384,6 +2384,20 @@ def write_shared(name, text):
         info = os.fstat(dfd)
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
             raise UnsafeFile(f"refusing to write into {directory}: not a directory of ours")
+        if subdirectory:
+            # One level down, created if missing and checked on its descriptor
+            # like the folder above it; never followed through a symlink.
+            try:
+                os.mkdir(subdirectory, 0o755, dir_fd=dfd)
+            except FileExistsError:
+                pass
+            sub = os.open(subdirectory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+            os.close(dfd)
+            dfd = sub
+            directory = directory / subdirectory
+            info = os.fstat(dfd)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+                raise UnsafeFile(f"refusing to write into {directory}: not a directory of ours")
         temporary = f".{name}.{secrets.token_hex(8)}.tmp"
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                      0o644, dir_fd=dfd)
@@ -2649,6 +2663,293 @@ def import_profile(name=None, path=None):
     }
 
 
+# ---- an Omarchy vendor tuning --------------------------------------------------
+# Omarchy ships speaker tunings for known laptops under
+# default/audio/tunings/<vendor>-<model>/ as a tuning.conf and a
+# filter-chain.conf, matched by DMI at first run.  A calibration made here is
+# most of such a tuning already: the same host, the same sink name, the same
+# kind of sections and the same limiter.  This renders it in that layout, with
+# the four figures Omarchy asks a tuning to report, so that it can be offered
+# as a pull request.  What Omarchy does not ship stays out: the bass add-on,
+# the loudness compensator and the volume following.
+VENDOR_LIMITER_THRESHOLD_DB = -1.0
+VENDOR_SIMULATION_SECONDS = 20.0
+VENDOR_REFERENCE_SECONDS = 60.0
+VENDOR_RATE_HZ = 48000
+
+
+def vendor_slug(hardware):
+    text = f"{hardware.get('sys_vendor') or 'laptop'} {hardware.get('product_name') or 'speakers'}"
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60] or "laptop-speakers"
+
+
+def vendor_sections(fit):
+    """The fit as (kind, frequency, q, gain) sections in Omarchy's order.
+
+    High-pass stages first, then the shelves and peaking sections by
+    frequency, then the high shelf; sections that do nothing are left out.
+    """
+    corner, q, stages = highpass_settings(fit)
+    sections = [("highpass", float(corner), float(q), 0.0)] * stages
+    peaking, low_shelf, high_shelf, bass = fit_sections(fit)
+    for shelf in (low_shelf, bass):
+        if shelf and abs(float(shelf.get("gain_db", 0.0))) > 0.005:
+            sections.append(("lowshelf", float(shelf["frequency_hz"]),
+                             float(shelf.get("q", 0.707)), float(shelf["gain_db"])))
+    for frequency, q_value, gain in sorted(peaking, key=lambda item: float(item[0])):
+        if abs(float(gain)) > 0.005:
+            sections.append(("peaking", float(frequency), float(q_value), float(gain)))
+    if high_shelf and abs(float(high_shelf.get("gain_db", 0.0))) > 0.005:
+        sections.append(("highshelf", float(high_shelf["frequency_hz"]),
+                         float(high_shelf.get("q", 0.707)), float(high_shelf["gain_db"])))
+    return sections
+
+
+def _plain(value):
+    return f"{round(float(value), 3):g}"
+
+
+def vendor_chain(sections, trim_db, input_gain, header):
+    """filter-chain.conf in the layout Omarchy ships."""
+    nodes, links, inputs = [], [], []
+    for side in ("l", "r"):
+        names = []
+        for index, (kind, frequency, q, gain) in enumerate(sections):
+            name = f"s{index}_{side}"
+            control = f'"Freq" = {_plain(frequency)} "Q" = {_plain(q)}'
+            if kind != "highpass":
+                control += f' "Gain" = {_plain(gain)}'
+            nodes.append(f'{{ type = builtin name = {name:<8} label = bq_{kind:<10} control = {{ {control} }} }}')
+            names.append(name)
+        gain_db = float(trim_db.get(side, 0.0))
+        if abs(gain_db) > 0.005:
+            name = f"s{len(sections)}_{side}"
+            nodes.append(f'{{ type = builtin name = {name:<8} label = linear        control = {{ "Mult" = {10.0 ** (gain_db / 20.0):.6f} "Add" = 0 }} }}')
+            names.append(name)
+        nodes.append("")
+        for before, after in zip(names, names[1:]):
+            links.append(f'{{ output = "{before}:Out" input = "{after}:In" }}')
+        links.append(f'{{ output = "{names[-1]}:Out" input = "limiter:in_{side}" }}')
+        inputs.append(f'"{names[0]}:In"')
+    nodes.append(f'''{{ type   = lv2
+            name   = limiter
+            plugin = "http://lsp-plug.in/plugins/lv2/limiter_stereo"
+            control = {{
+              # Both default to enabled: "alr" regulates level toward the
+              # threshold and "boost" normalises the threshold up to full
+              # scale. A fixed tuning must switch them off or its tone drifts
+              # with programme level.
+              "alr"   = 0
+              "boost" = 0
+              "g_in"  = {float(input_gain):.4f}
+              "th"    = 0.891
+            }}
+          }}''')
+    joined_nodes = "\n          ".join(nodes).rstrip()
+    joined_links = "\n          ".join(links)
+    return f'''{header}
+context.modules = [
+  {{ name = libpipewire-module-filter-chain
+    args = {{
+      node.description = "Laptop Speakers"
+      media.name       = "Laptop Speakers"
+
+      filter.graph = {{
+        nodes = [
+          {joined_nodes}
+        ]
+
+        links = [
+          {joined_links}
+        ]
+
+        inputs  = [ {" ".join(inputs)} ]
+        outputs = [ "limiter:out_l" "limiter:out_r" ]
+      }}
+
+      audio.channels = 2
+      audio.position = [ FL FR ]
+
+      capture.props = {{
+        node.name   = "{VIRTUAL_SINK}"
+        media.class = Audio/Sink
+      }}
+      playback.props = {{
+        node.name     = "{VIRTUAL_SINK}_output"
+        node.passive  = true
+        target.object = "@SPEAKER_SINK@"
+        # The filter's output is a movable sink input like any other; pinned so
+        # that rerouting "all streams" cannot drag the processing along.
+        node.dont-move = true
+        # Wait for the named target rather than linking to whatever default
+        # exists while the speaker sink is still being discovered.
+        node.dont-fallback = true
+        node.linger = true
+      }}
+    }}
+  }}
+]
+'''
+
+
+def _pink_noise(seconds, rate, seed):
+    samples = int(seconds * rate)
+    spectrum = np.fft.rfft(np.random.default_rng(seed).standard_normal(samples))
+    frequencies = np.fft.rfftfreq(samples, 1.0 / rate)
+    spectrum[1:] /= np.sqrt(frequencies[1:])
+    spectrum[0] = 0.0
+    noise = np.fft.irfft(spectrum, samples)
+    return noise / np.max(np.abs(noise))
+
+
+def vendor_test_signal(reference, rate):
+    """A hot master to run through the chain: a track, or pink noise."""
+    if reference:
+        proc = subprocess.run(
+            ["ffmpeg", "-nostdin", "-v", "error", "-i", str(reference), "-t", str(VENDOR_REFERENCE_SECONDS),
+             "-ac", "2", "-ar", str(rate), "-f", "f32le", "-"],
+            capture_output=True, check=False,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            raise SystemExit(f"ffmpeg could not read {reference}: {proc.stderr.decode('utf-8', 'ignore')[:200]}")
+        signal = np.frombuffer(proc.stdout, dtype=np.float32).astype(float)
+        signal = signal[: signal.size - signal.size % 2].reshape(-1, 2)
+        return signal, f"{Path(reference).name}, first {VENDOR_REFERENCE_SECONDS:.0f} s"
+    left = _pink_noise(VENDOR_SIMULATION_SECONDS, rate, 1)
+    right = _pink_noise(VENDOR_SIMULATION_SECONDS, rate, 2)
+    peak = 10.0 ** (-0.1 / 20.0)
+    return np.stack([left, right], axis=1) * peak, f"pink noise, {VENDOR_SIMULATION_SECONDS:.0f} s, peaks at -0.1 dBFS"
+
+
+def ebur128_lra(signal, rate):
+    """Loudness range in LU as ffmpeg's ebur128 reports it, or None."""
+    if not shutil.which("ffmpeg"):
+        return None
+    pcm = np.clip(signal, -1.0, 1.0).astype(np.float32).tobytes()
+    proc = subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "info", "-f", "f32le", "-ar", str(rate), "-ac", "2", "-i", "-",
+         "-af", "ebur128=framelog=quiet", "-f", "null", "-"],
+        input=pcm, capture_output=True, check=False,
+    )
+    match = re.search(r"LRA:\s*(-?\d+(?:\.\d+)?)\s*LU", proc.stderr.decode("utf-8", "ignore"))
+    return float(match.group(1)) if match else None
+
+
+def vendor_metrics(sections, input_gain, rate, reference=None):
+    """The four figures Omarchy asks a tuning to report, less the fit's own."""
+    load_dsp()
+    from calibration_optimizer import group_delay_swing_ms, chain_sos
+    import scipy.signal
+    swing = group_delay_swing_ms(sections, rate)
+    signal, label = vendor_test_signal(reference, rate)
+    sos = chain_sos(sections, rate)
+    if sos.size:
+        processed = np.stack([scipy.signal.sosfilt(sos, signal[:, channel]) for channel in range(2)], axis=1)
+    else:
+        processed = signal.copy()
+    processed = processed * float(input_gain)
+    peak_dbfs = 20.0 * math.log10(max(float(np.max(np.abs(processed))), 1e-9))
+    before, after = ebur128_lra(signal, rate), ebur128_lra(processed, rate)
+    return {
+        "bass_group_delay_swing_ms": round(swing, 1),
+        "limiter_headroom_db": round(VENDOR_LIMITER_THRESHOLD_DB - peak_dbfs, 1),
+        "peak_dbfs": round(peak_dbfs, 2),
+        "dynamic_range_delta_lu": round(after - before, 1) if before is not None and after is not None else None,
+        "signal": label,
+    }
+
+
+def vendor_tuning(reference=None):
+    """Write the playing calibration as an Omarchy vendor tuning."""
+    profile = load_profile(PROFILE)
+    if profile is None:
+        raise SystemExit("No calibration is installed, so there is nothing to render.")
+    fit = profile["fit"]
+    hardware = hardware_id()
+    slug = vendor_slug(hardware)
+    sections = vendor_sections(fit)
+    trim = fit.get("channel_trim") or {}
+    trim_db = {"l": float(trim.get("left_db", 0.0)), "r": float(trim.get("right_db", 0.0))}
+    input_gain = float(fit.get("input_gain_linear", 1.0))
+    metrics = vendor_metrics(sections, input_gain, VENDOR_RATE_HZ, reference)
+    mic = profile.get("microphone") or {}
+    kind = "the built-in microphones" if mic.get("internal") else "an external measuring microphone at the listening position"
+    when = str(profile.get("created_at", ""))[:10]
+    today = dt.date.today().isoformat()
+    label = hardware["label"]
+    sku = hardware.get("product_sku") or ""
+    sink_name = (profile.get("speaker") or {}).get("name") or ""
+    voicing = VOICING_LABELS.get(profile.get("voicing"), "flat")
+    header = f'''# {label} speaker tuning.
+#
+# Fitted by the Omarchy Speaker Calibrator {plugin_version()} from a swept-sine
+# measurement of the internal speakers with {kind}, on {when}: {len(sections)}
+# sections and a lookahead limiter. Cuts are preferred; boosts are allowed
+# only where a held-out repeat confirmed them and are paid for by the input
+# gain, so peaks never exceed what the limiter is told to expect. The
+# high-pass sits at the measured knee below which these drivers make no
+# usable output. Target voicing: {voicing}.
+#
+# Measures {fit.get("weighted_rmse_after_db", 0.0):.2f} dB RMS against the calibrator's target
+# (perceptually weighted over its own error metric). See tuning.conf.
+#
+# Channels are wired explicitly because the limiter is a stereo plugin; a mono
+# graph is duplicated per channel and would limit each side independently,
+# shifting the stereo image on bass transients.'''
+    chain = vendor_chain(sections, trim_db, input_gain, header)
+    match_line = (f'match_sku=("{sku}")' if sku
+                  else f'match_dmi=("{hardware.get("product_name", "")}")   ## no DMI SKU on this machine; substring of the product name')
+    lra = metrics["dynamic_range_delta_lu"]
+    tuning = f'''## {label} internal speakers.
+##
+## Fitted by the Omarchy Speaker Calibrator from a swept-sine measurement of
+## the speakers with {kind}. The sections and the limiter are in
+## filter-chain.conf; the bass add-on, loudness compensation and volume
+## following the plugin can add are deliberately not part of this tuning.
+
+description="{label} speakers"
+## Matched on the DMI product SKU, compared as a whole value.
+{match_line}
+## The internal speaker sink, as PipeWire names it on this machine.
+sink_pattern='^{sink_name.replace('.', chr(92) + '.')}$'
+
+## Provenance.
+derived_from="Omarchy Speaker Calibrator {plugin_version()}: sweep measurement with {kind}, {voicing} target, measured {when}"
+validated_by=""   ## your name, once you have listened on the hardware named below
+validated_on="{today}"
+validated_hardware="{label}{f' ({sku})' if sku else ''}"
+
+## Measurements.
+magnitude_rms_db="{fit.get("weighted_rmse_after_db", 0.0):.2f}"   ## against the calibrator's target, perceptually weighted
+bass_group_delay_swing_ms="{metrics["bass_group_delay_swing_ms"]}"   ## from the biquad coefficients, 30-300 Hz
+limiter_headroom_db="{metrics["limiter_headroom_db"]}"   ## threshold (-1 dBFS) minus the peak of {metrics["signal"]} after the chain and input gain
+dynamic_range_delta_lu="{lra if lra is not None else ''}"   ## LRA after minus before on the same signal, ffmpeg ebur128{'' if lra is not None else ' (ffmpeg was not available)'}
+'''
+    readme = f'''This is a speaker tuning for Omarchy, rendered by the Omarchy Speaker Calibrator.
+
+To offer it to Omarchy: copy this directory into a checkout of
+https://github.com/omacom/omarchy as default/audio/tunings/{slug}/, listen to it
+on the hardware, fill in validated_by in tuning.conf, and open a pull request.
+Omarchy's docs/audio-tuning.md describes what a tuning must report.
+
+Files:
+  tuning.conf        description, hardware match, provenance, measurements
+  filter-chain.conf  the graph, @SPEAKER_SINK@ substituted by Omarchy on install
+'''
+    subdirectory = f"omarchy-tuning-{slug}"
+    written = [write_shared("tuning.conf", tuning, subdirectory=subdirectory),
+               write_shared("filter-chain.conf", chain, subdirectory=subdirectory),
+               write_shared("README.txt", readme, subdirectory=subdirectory)]
+    return {
+        "directory": str(written[0].parent), "files": [path.name for path in written],
+        "slug": slug, "sections": len(sections), "metrics": metrics,
+        "message": f"Wrote an Omarchy tuning for {label} to {written[0].parent}: "
+                   f"{len(sections)} sections, group delay swing {metrics['bass_group_delay_swing_ms']} ms, "
+                   f"limiter headroom {metrics['limiter_headroom_db']} dB. Listen, fill in validated_by, "
+                   f"and offer it as default/audio/tunings/{slug}/ in a pull request.",
+    }
+
+
 def cached_status():
     """The last status this plugin wrote, for drawing the panel immediately.
 
@@ -2862,6 +3163,8 @@ def main():
         sub.add_parser(name)
     sub.add_parser("verify-json")
     sub.add_parser("export-json")
+    vendor = sub.add_parser("vendor-tuning-json")
+    vendor.add_argument("--reference", help="a track to run through the chain for the headroom and LRA figures")
     relevel_parser = sub.add_parser("relevel-json")
     relevel_parser.add_argument("--bass", choices=("normal", "full"))
     relevel_parser.add_argument("--loudness", choices=("protected", "balanced", "matched"))
@@ -2924,6 +3227,8 @@ def main():
         print(json.dumps(verify_calibration()))
     elif command == "relevel-json":
         print(json.dumps(relevel(bass=args.bass, loudness=args.loudness)))
+    elif command == "vendor-tuning-json":
+        print(json.dumps(vendor_tuning(reference=args.reference)))
     elif command == "export-json":
         print(json.dumps(export_profile()))
     elif command == "import-json":

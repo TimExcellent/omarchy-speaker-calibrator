@@ -39,6 +39,7 @@ Item {
       : operation === "loudness" ? "Switching loudness compensation…"
       : operation === "relevel" ? "Switching…"
       : operation === "export" ? "Exporting the calibration…"
+      : operation === "vendor" ? "Rendering the Omarchy tuning…"
       : operation === "import" ? "Loading the shared calibration…"
       : operation === "refit" ? "Applying…" : "Working…"
     _stdout = ""
@@ -172,6 +173,8 @@ Item {
   // Hand the calibration that is playing to someone, or take theirs in.  The
   // name is one the helper listed from the Downloads folder; it checks it again.
   function exportProfile() { start("export", ["export-json"]) }
+  // The same calibration in the layout Omarchy ships its own tunings in.
+  function exportVendor() { start("vendor", ["vendor-tuning-json"]) }
   function importProfile(name) { start("import", ["import-json", "--file", String(name)]) }
   function disable() { start("disable", ["disable"]) }
   function compare() { start("compare", ["compare-toggle"]) }
@@ -363,6 +366,9 @@ Item {
           var exported = JSON.parse(raw)
           root.message = exported.message || "Exported"
           Qt.callLater(root.refreshStatus)
+        } else if (root.phase === "vendor") {
+          var rendered = JSON.parse(raw)
+          root.message = rendered.message || "Rendered"
         } else if (root.phase === "import") {
           var loaded = JSON.parse(raw)
           root.proposal = loaded.proposal || null

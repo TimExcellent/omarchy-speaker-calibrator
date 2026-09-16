@@ -1581,3 +1581,69 @@ def optimize_peq(
             if optimizer_results else "No filter passed held-out validation."
         ),
     }
+
+
+# ---- rendering a fit as an Omarchy vendor tuning ------------------------------
+# Omarchy ships speaker tunings as a PipeWire filter-chain of RBJ biquads ending
+# in a limiter, and asks for four measured figures alongside.  The magnitude
+# responses above are enough to fit; these give the same sections as
+# coefficients, so a chain can be simulated in time and its group delay read.
+
+def rbj_coefficients(kind, frequency_hz, q, gain_db, rate_hz):
+    """Audio EQ Cookbook coefficients (b, a), normalised so a[0] == 1."""
+    omega = 2.0 * math.pi * float(frequency_hz) / float(rate_hz)
+    sin_w, cos_w = math.sin(omega), math.cos(omega)
+    alpha = sin_w / (2.0 * float(q))
+    amp = 10.0 ** (float(gain_db) / 40.0)
+    if kind == "highpass":
+        b = ((1.0 + cos_w) / 2.0, -(1.0 + cos_w), (1.0 + cos_w) / 2.0)
+        a = (1.0 + alpha, -2.0 * cos_w, 1.0 - alpha)
+    elif kind == "peaking":
+        b = (1.0 + alpha * amp, -2.0 * cos_w, 1.0 - alpha * amp)
+        a = (1.0 + alpha / amp, -2.0 * cos_w, 1.0 - alpha / amp)
+    elif kind in ("lowshelf", "highshelf"):
+        root = 2.0 * math.sqrt(amp) * alpha
+        if kind == "lowshelf":
+            b = (amp * ((amp + 1.0) - (amp - 1.0) * cos_w + root),
+                 2.0 * amp * ((amp - 1.0) - (amp + 1.0) * cos_w),
+                 amp * ((amp + 1.0) - (amp - 1.0) * cos_w - root))
+            a = ((amp + 1.0) + (amp - 1.0) * cos_w + root,
+                 -2.0 * ((amp - 1.0) + (amp + 1.0) * cos_w),
+                 (amp + 1.0) + (amp - 1.0) * cos_w - root)
+        else:
+            b = (amp * ((amp + 1.0) + (amp - 1.0) * cos_w + root),
+                 -2.0 * amp * ((amp - 1.0) + (amp + 1.0) * cos_w),
+                 amp * ((amp + 1.0) + (amp - 1.0) * cos_w - root))
+            a = ((amp + 1.0) - (amp - 1.0) * cos_w + root,
+                 2.0 * ((amp - 1.0) - (amp + 1.0) * cos_w),
+                 (amp + 1.0) - (amp - 1.0) * cos_w - root)
+    else:
+        raise ValueError(f"unknown section kind {kind!r}")
+    a0 = a[0]
+    return np.asarray(b, dtype=float) / a0, np.asarray(a, dtype=float) / a0
+
+
+def chain_response(sections, frequencies, rate_hz):
+    """Complex response of a chain of (kind, frequency_hz, q, gain_db) sections."""
+    z = np.exp(-2j * math.pi * np.asarray(frequencies, dtype=float) / float(rate_hz))
+    response = np.ones_like(z)
+    for kind, frequency_hz, q, gain_db in sections:
+        b, a = rbj_coefficients(kind, frequency_hz, q, gain_db, rate_hz)
+        response = response * (b[0] + b[1] * z + b[2] * z * z) / (a[0] + a[1] * z + a[2] * z * z)
+    return response
+
+
+def group_delay_swing_ms(sections, rate_hz, low_hz=30.0, high_hz=300.0):
+    """Max minus min group delay over the bass band, in milliseconds."""
+    frequencies = np.arange(low_hz, high_hz + 0.5, 0.5)
+    phase = np.unwrap(np.angle(chain_response(sections, frequencies, rate_hz)))
+    omega = 2.0 * math.pi * frequencies
+    delay_ms = -np.gradient(phase, omega) * 1000.0
+    return float(np.max(delay_ms) - np.min(delay_ms)) if delay_ms.size else 0.0
+
+
+def chain_sos(sections, rate_hz):
+    """Second-order sections for scipy, one row per biquad."""
+    rows = [np.concatenate(rbj_coefficients(kind, f, q, g, rate_hz))
+            for kind, f, q, g in sections]
+    return np.asarray(rows, dtype=float) if rows else np.zeros((0, 6))

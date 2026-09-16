@@ -1593,6 +1593,17 @@ Panel {
               enabled: !service.busy
               onClicked: service.exportProfile()
             }
+            ActionRow {
+              visible: service.status.enabled
+                && service.status.profile !== null && service.status.profile !== undefined
+              width: parent.width
+              icon: "󰁨"
+              label: service.busy && service.phase === "vendor" ? "Rendering…" : "Export as an Omarchy tuning"
+              description: "Writes tuning.conf and filter-chain.conf in the layout Omarchy ships under "
+                + "default/audio/tunings, to your Downloads folder, ready for a pull request"
+              enabled: !service.busy
+              onClicked: service.exportVendor()
+            }
             Repeater {
               model: service.status.sharedProfiles || []
               ActionRow {

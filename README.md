@@ -262,6 +262,20 @@ differ between models and a calibration for another laptop may sound wrong.
 When the exporting machine's speaker device does not exist here, the
 calibration is pointed at this machine's speakers instead.
 
+**Export as an Omarchy tuning** renders the same calibration in the layout
+Omarchy ships its own laptop tunings in, `tuning.conf` and `filter-chain.conf`
+under `default/audio/tunings/<vendor>-<model>/`, into your Downloads folder.
+The chain holds only what Omarchy ships: the high-pass, the fitted sections,
+the shelves and the limiter, with the bass add-on, loudness compensation and
+volume following left out. `tuning.conf` matches on the DMI product SKU and
+the speaker sink name, records where the tuning came from, and reports the
+four figures Omarchy asks for: the fit's RMS deviation from its target, the
+group delay swing over 30 to 300 Hz from the biquad coefficients, and the
+limiter headroom and loudness-range change measured by running a hot master
+through the chain (pink noise unless you pass a track:
+`speaker-calibrate.py vendor-tuning-json --reference song.flac`). Listen on the
+hardware, fill in `validated_by`, and offer it as a pull request to Omarchy.
+
 Every value a shared file could feed into the filter chain is checked against
 the same limits the optimizer works under before anything is loaded: no cut
 deeper than 18 dB, no boost above 6 dB, no high-pass above 400 Hz, no trim

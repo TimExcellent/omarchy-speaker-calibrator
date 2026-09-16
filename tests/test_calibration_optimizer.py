@@ -1997,6 +1997,73 @@ class InstallDefaultsTests(unittest.TestCase):
         self.assertEqual(calls, ["start", "stop"])
 
 
+class PreviewDecisionTests(unittest.TestCase):
+    """A new calibration plays and waits; apply or keep the previous."""
+
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory(); root = Path(self.folder.name)
+        self.data = root / "data"; self.data.mkdir(0o700)
+        self.paths = {name: self.data / f"{name}.json" for name in ("active-profile", "previous-profile", "held-profile", "held-previous", "compare-state")}
+        self.activated = []
+        def fake_install_now(profile):
+            # What the real one does to the files: the current moves to previous, the new becomes current.
+            current = speaker_calibrate.load_profile(speaker_calibrate.PROFILE)
+            if current is not None:
+                speaker_calibrate.write_atomic(speaker_calibrate.PREVIOUS_PROFILE, json.dumps(current))
+            speaker_calibrate.write_atomic(speaker_calibrate.PROFILE, json.dumps(profile))
+            self.activated.append(("install", profile["created_at"])); return dict(profile, installed=True)
+        patches = [
+            mock.patch.object(speaker_calibrate, "DATA", self.data),
+            mock.patch.object(speaker_calibrate, "PROFILE", self.paths["active-profile"]),
+            mock.patch.object(speaker_calibrate, "PREVIOUS_PROFILE", self.paths["previous-profile"]),
+            mock.patch.object(speaker_calibrate, "HELD_PROFILE", self.paths["held-profile"]),
+            mock.patch.object(speaker_calibrate, "HELD_PREVIOUS", self.paths["held-previous"]),
+            mock.patch.object(speaker_calibrate, "COMPARE_STATE", self.paths["compare-state"]),
+            mock.patch.object(speaker_calibrate, "install_now", fake_install_now),
+            mock.patch.object(speaker_calibrate, "reinstall_profile", lambda profile: self.activated.append(("reinstall", profile["created_at"])) or "live"),
+            mock.patch.object(speaker_calibrate, "compare_toggle", lambda: self.activated.append(("compare", None))),
+        ]
+        for patch in patches:
+            patch.start(); self.addCleanup(patch.stop)
+        self.addCleanup(self.folder.cleanup)
+
+    def profile(self, stamp):
+        return {"created_at": stamp, "fit": {"filters": []}, "speaker": {"name": "s"}, "quality": {"accepted": True}}
+
+    def test_the_first_calibration_installs_and_nothing_waits(self):
+        result = speaker_calibrate.preview_install(self.profile("first"))
+        self.assertNotIn("previewing", result)
+        self.assertFalse(speaker_calibrate.previewing())
+
+    def test_keeping_the_previous_puts_both_slots_back(self):
+        self.paths["active-profile"].write_text(json.dumps(self.profile("old"))); self.paths["previous-profile"].write_text(json.dumps(self.profile("older")))
+        result = speaker_calibrate.preview_install(self.profile("new"))
+        self.assertTrue(result["previewing"]); self.assertTrue(speaker_calibrate.previewing())
+        self.assertEqual(speaker_calibrate.load_profile(speaker_calibrate.PROFILE)["created_at"], "new")
+        self.assertEqual(speaker_calibrate.load_profile(speaker_calibrate.PREVIOUS_PROFILE)["created_at"], "old")
+        # A second measurement while waiting keeps the original held copies.
+        speaker_calibrate.preview_install(self.profile("newer"))
+        self.assertEqual(speaker_calibrate.load_profile(speaker_calibrate.HELD_PROFILE)["created_at"], "old")
+        decided = speaker_calibrate.preview_discard()
+        self.assertEqual(decided["profile"]["created_at"], "old")
+        self.assertEqual(speaker_calibrate.load_profile(speaker_calibrate.PROFILE)["created_at"], "old")
+        self.assertEqual(speaker_calibrate.load_profile(speaker_calibrate.PREVIOUS_PROFILE)["created_at"], "older")
+        self.assertFalse(speaker_calibrate.previewing())
+        self.assertEqual(self.activated[-1], ("reinstall", "old"))
+
+    def test_applying_keeps_the_new_one_and_the_old_one_under_switch_profile(self):
+        self.paths["active-profile"].write_text(json.dumps(self.profile("old")))
+        speaker_calibrate.preview_install(self.profile("new"))
+        speaker_calibrate.write_compare_state({"active": "previous", "bypass": False})
+        decided = speaker_calibrate.preview_apply()
+        self.assertEqual(decided["profile"]["created_at"], "new")
+        self.assertEqual(speaker_calibrate.load_profile(speaker_calibrate.PREVIOUS_PROFILE)["created_at"], "old")
+        self.assertFalse(speaker_calibrate.previewing())
+        self.assertIn(("compare", None), self.activated)
+        with self.assertRaises(SystemExit):
+            speaker_calibrate.preview_apply()
+
+
 class VendorTrialTests(unittest.TestCase):
     """Telling whose graph plays, and staging Omarchy's tree for a trial."""
 

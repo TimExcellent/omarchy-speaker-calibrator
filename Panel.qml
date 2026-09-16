@@ -366,6 +366,8 @@ Panel {
   }
   function heroMeta() {
     if (service.working) return service.message
+    if (service.status.previewing === true)
+      return "A new calibration is playing and waits for your decision below."
     if (service.status.vendorTrial === true)
       return service.status.graph === "vendor-trial"
         ? "Playing the exported Omarchy tuning through Omarchy's own installer; the calibration "
@@ -1004,6 +1006,52 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
+          Column {
+            visible: service.status.previewing === true
+            width: parent.width
+            spacing: Style.space(6)
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: "A new calibration was measured and is playing now"
+                + (service.status.profile && service.status.profile.created_at
+                   ? " (" + String(service.status.profile.created_at).slice(11, 16) + " UTC)" : "")
+                + ". Nothing is final yet: apply it, or keep the one you had. Hear the previous one "
+                + "switches between the two."
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+            ActionRow {
+              width: parent.width
+              icon: "󰄾"
+              label: service.busy && service.phase === "previewapply" ? "Applying…" : "Apply the new calibration"
+              description: "Keeps it; the previous one stays available under Switch profile"
+              enabled: !service.busy
+              onClicked: service.applyPreview()
+            }
+            ActionRow {
+              width: parent.width
+              icon: "󰅖"
+              label: service.busy && service.phase === "previewdiscard" ? "Restoring…" : "Keep the previous calibration"
+              description: "Puts it back; the new measurement stays as the last measurement"
+              enabled: !service.busy
+              onClicked: service.discardPreview()
+            }
+            ActionRow {
+              visible: service.status.compare !== undefined && service.status.compare !== null
+                && service.status.compare.available === true
+              width: parent.width
+              icon: "󰓦"
+              label: service.busy && service.phase === "compare" ? "Switching…"
+                : ((service.status.compare || {}).active === "previous" ? "Hear the new one" : "Hear the previous one")
+              description: "Switches live between the two, level matched"
+              enabled: !service.busy
+              onClicked: service.compare()
+            }
+          }
+
           ActionRow {
             visible: service.status.vendorTrial === true
             width: parent.width
@@ -1214,7 +1262,7 @@ Panel {
             onClicked: {
               var sink = service.sinks[root.sinkIndex]
               var mic = service.microphones[root.micIndex]
-              service.measure(sink.name, mic.name, root.selectedChannelValue(), root.options(), true)
+              service.measure(sink.name, mic.name, root.selectedChannelValue(), root.options(), "preview")
             }
           }
 

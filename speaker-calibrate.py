@@ -3326,6 +3326,89 @@ def vendor_restore():
             "message": "Back to the calibration" + (" (tuning restarted)." if method == "restart" else ".")}
 
 
+# ---- a new calibration waits for a decision ---------------------------------
+# A measurement used to replace the calibration the moment it passed.  Now,
+# when one already plays, the new one is installed for listening while the
+# old one is held aside, and the panel asks: apply it, or keep the previous?
+# Either answer is one live update.  The first calibration has nothing to
+# compare against and installs as before.
+HELD_PROFILE = DATA / "held-profile.json"
+HELD_PREVIOUS = DATA / "held-previous.json"
+
+
+def previewing():
+    return HELD_PROFILE.exists()
+
+
+def _forget_held():
+    for path in (HELD_PROFILE, HELD_PREVIOUS):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def preview_install(profile):
+    """Play a new calibration without letting go of the one before it."""
+    current = load_profile(PROFILE)
+    if current is None:
+        return install_now(profile)
+    if not previewing():
+        # A second measurement while one already waits keeps the original held
+        # copies: the decision stays between the newest and what played before.
+        write_atomic(HELD_PROFILE, json.dumps(current, indent=2) + "\n")
+        previous = load_profile(PREVIOUS_PROFILE)
+        if previous is not None:
+            write_atomic(HELD_PREVIOUS, json.dumps(previous, indent=2) + "\n")
+        else:
+            try:
+                HELD_PREVIOUS.unlink()
+            except OSError:
+                pass
+    result = install_now(profile)
+    result["previewing"] = True
+    return result
+
+
+def preview_if_accepted(profile):
+    if profile.get("quality", {}).get("accepted") and profile.get("fit"):
+        return preview_install(profile)
+    return profile
+
+
+def preview_apply():
+    """Keep the new calibration; the previous stays under Switch profile."""
+    if not previewing():
+        raise SystemExit("No new calibration is waiting for a decision.")
+    if compare_state()["active"] == "previous":
+        compare_toggle()
+    _forget_held()
+    return {"previewing": False, "profile": load_profile(PROFILE),
+            "message": "The new calibration is applied; the one before it stays available under Switch profile."}
+
+
+def preview_discard():
+    """Put the previous calibration back; the new one stays as the last measurement."""
+    held = load_profile(HELD_PROFILE)
+    if held is None:
+        raise SystemExit("No new calibration is waiting for a decision.")
+    held_previous = load_profile(HELD_PREVIOUS)
+    write_atomic(PROFILE, json.dumps(held, indent=2) + "\n")
+    if held_previous is not None:
+        write_atomic(PREVIOUS_PROFILE, json.dumps(held_previous, indent=2) + "\n")
+    else:
+        try:
+            PREVIOUS_PROFILE.unlink()
+        except OSError:
+            pass
+    write_compare_state({"active": "current", "bypass": False})
+    method = reinstall_profile(held)
+    _forget_held()
+    return {"previewing": False, "profile": held, "method": method,
+            "message": "Kept the previous calibration. The new measurement stays as the last "
+                       "measurement; Install last measurement applies it later if you change your mind."}
+
+
 def cached_status():
     """The last status this plugin wrote, for drawing the panel immediately.
 
@@ -3366,6 +3449,7 @@ def status_payload():
             "verification": load_verification(),
             "bassEnhancer": bass_enhancer_state(),
             "deepBass": (profile or {}).get("deep_bass", "off"),
+            "previewing": previewing(),
             "loudnessCompensation": (profile or {}).get("loudness_compensation", "off"),
             "loudnessTracker": "running" if loudness_running() else "stopped",
             "microphones": archived_microphones(),
@@ -3544,6 +3628,8 @@ def main():
         sub.add_parser(name)
     sub.add_parser("verify-json")
     sub.add_parser("export-json")
+    sub.add_parser("preview-apply-json")
+    sub.add_parser("preview-discard-json")
     vendor = sub.add_parser("vendor-tuning-json")
     vendor.add_argument("--reference", help="a track to run through the chain for the headroom and LRA figures")
     trial = sub.add_parser("vendor-try-json")
@@ -3570,6 +3656,8 @@ def main():
     calibrate.add_argument("--bass", choices=("normal", "full"), default="normal")
     calibrate.add_argument("--channel-trim", choices=("off", "auto"), default="off")
     calibrate.add_argument("--mic-cal-file")
+    calibrate.add_argument("--preview", action="store_true",
+                           help="play the result and wait for a decision when a calibration already exists")
     calibrate.add_argument("--install", action="store_true",
                            help="install and play the result when it passes")
     reanalyze = sub.add_parser("reanalyze-saved-json")
@@ -3597,7 +3685,11 @@ def main():
             args.sink, args.mic, args.channel, args.voicing, args.mic_cal_file,
             args.loudness, args.bass, args.channel_trim,
         )
-        print(json.dumps(install_if_accepted(profile) if args.install else profile))
+        if args.install:
+            profile = install_if_accepted(profile)
+        elif args.preview:
+            profile = preview_if_accepted(profile)
+        print(json.dumps(profile))
     elif command == "reanalyze-saved-json":
         profile = reanalyze_saved_capture(
             args.voicing, args.channel, args.loudness, args.bass, args.channel_trim
@@ -3619,6 +3711,10 @@ def main():
         print(json.dumps(vendor_restore()))
     elif command == "vendor-tuning-json":
         print(json.dumps(vendor_tuning(reference=args.reference)))
+    elif command == "preview-apply-json":
+        print(json.dumps(preview_apply()))
+    elif command == "preview-discard-json":
+        print(json.dumps(preview_discard()))
     elif command == "export-json":
         print(json.dumps(export_profile()))
     elif command == "import-json":

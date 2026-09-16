@@ -31,8 +31,11 @@ own packages rather than the AUR. Nothing here needs a terminal.
    already selected.
 3. **Be quiet for about thirty seconds.** You will hear six sweeps: three per
    speaker.
-4. **That is it.** If the measurement passes its quality checks it installs
-   itself and you are listening to the result.
+4. **Listen, then decide.** If the measurement passes its quality checks it
+   plays right away, and when a calibration was already installed the panel
+   asks: apply the new one, or keep the previous? A switch lets you hear both
+   before you answer, level matched, and either answer takes effect at once.
+   The first calibration has nothing to compare against and simply installs.
 
 ![The panel: four switches, the equalizer, and the calibrate button](screenshot.png)
 

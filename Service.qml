@@ -18,7 +18,7 @@ Item {
   // takes long enough that the panel says so while it runs.
   readonly property var _quickPhases: ["relevel", "deepbass", "loudness", "bypass", "compare",
                                         "status", "devices", "cache", "mics", "output",
-                                        "export", "vendor"]
+                                        "export", "vendor", "previewapply", "previewdiscard"]
   // What the last export wrote and where, shown next to the buttons that did it.
   property string exportNote: ""
   readonly property bool working: busy && _quickPhases.indexOf(phase) < 0
@@ -176,7 +176,8 @@ Item {
                      "--channel", String(channel)].concat(optionArguments(options))
     if (options.micCalibrationFile && options.micCalibrationFile.length > 0)
       arguments.push("--mic-cal-file", options.micCalibrationFile)
-    if (install) arguments.push("--install")
+    if (install === "preview") arguments.push("--preview")
+    else if (install) arguments.push("--install")
     start("measure", arguments)
   }
   // Re-fit the last recorded sweeps with different options, without playing
@@ -187,6 +188,9 @@ Item {
     start("refit", arguments)
   }
   function install() { start("install", ["install-proposal"]) }
+  // A new calibration is playing and waits: keep it, or go back.
+  function applyPreview() { start("previewapply", ["preview-apply-json"]) }
+  function discardPreview() { start("previewdiscard", ["preview-discard-json"]) }
   // Bass and loudness without a refit: the fit already holds both answers.
   function relevel(options) {
     start("relevel", ["relevel-json", "--bass", options.bass || "normal",
@@ -359,7 +363,10 @@ Item {
           if (accepted && result.installed) {
             root.status = Object.assign({}, root.status, { enabled: true, profile: result, bypass: false })
             var refinement = ((result.measurement || {}).refinement) || {}
-            root.message = root.phase === "measure" ? "Calibrated and playing: " + root.simpleLabel(result)
+            root.message = root.phase === "measure"
+              ? (result.previewing
+                 ? "New calibration measured and playing. Apply it, or keep the previous one?"
+                 : "Calibrated and playing: " + root.simpleLabel(result))
               : root.phase === "refine"
                 ? "Improved from the check, round " + refinement.iterations
                   + " · biggest change " + Number(refinement.largest_step_db || 0).toFixed(1)
@@ -386,6 +393,11 @@ Item {
           root.status = Object.assign({}, root.status, { profile: levelled.profile, bypass: false })
           if (levelled.proposal) root.setProposal(levelled.proposal)
           root.message = levelled.message || ""
+          Qt.callLater(root.refreshStatus)
+        } else if (root.phase === "previewapply" || root.phase === "previewdiscard") {
+          var decided = JSON.parse(raw)
+          if (decided.profile) root.status = Object.assign({}, root.status, { profile: decided.profile, previewing: false, bypass: false })
+          root.message = decided.message || ""
           Qt.callLater(root.refreshStatus)
         } else if (root.phase === "export") {
           var exported = JSON.parse(raw)

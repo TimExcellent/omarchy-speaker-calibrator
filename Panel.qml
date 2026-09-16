@@ -184,6 +184,35 @@ Panel {
     return "Measure again with the " + kind + " this calibration was made with, "
       + "through the corrected output, and compare it with the plan"
   }
+  // A loaded calibration says where it came from, and whether that is here.
+  function importedNote() {
+    var imported = service.proposal ? service.proposal.imported : null
+    if (!imported) return ""
+    var matches = imported.matches || {}
+    var file = String(imported.file || "a shared file")
+    var from = String((imported.hardware || {}).label || "another machine")
+    if (matches.machine === true)
+      return "Loaded from " + file + ", made on this model (" + from + ")"
+        + (matches.speakers === true ? "." : ", through a different speaker device; it now points at yours.")
+    return "Loaded from " + file + ". It was made on " + from + "; this is "
+      + String(imported.this_machine || "a different machine")
+      + ". Speakers differ between models, so it may sound wrong here. Install it to try; "
+      + "Switch profile brings your own back."
+  }
+  function importedMismatch() {
+    var imported = service.proposal ? service.proposal.imported : null
+    return !!(imported && imported.matches && imported.matches.machine !== true)
+  }
+  function sharedDescription(entry) {
+    if (!entry || entry.valid !== true)
+      return "Cannot be loaded: " + String((entry || {}).reason || "not a calibration file")
+    var matches = entry.matches || {}
+    var parts = []
+    if (entry.microphone) parts.push(String(entry.microphone))
+    if (entry.created_at) parts.push(String(entry.created_at).slice(0, 10))
+    parts.push(matches.machine === true ? "made on this model" : "made on another model, warning on load")
+    return parts.join("  ·  ")
+  }
   function currentOutputName() {
     return service.status.defaultSinkDescription
       || service.status.defaultSink || "another output"
@@ -1527,6 +1556,62 @@ Panel {
             }
 
             PanelSeparator { foreground: root.foreground }
+            PanelSectionHeader {
+              id: sharedHeader
+              text: "SHARED CALIBRATIONS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: "Export the calibration that is playing to your Downloads folder and hand the file "
+                + "to someone with the same machine. A shared file dropped into Downloads appears "
+                + "below; loading it makes it the last measurement, ready to install, and says so "
+                + "when it was made on other hardware."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            ActionRow {
+              visible: service.status.enabled
+                && service.status.profile !== null && service.status.profile !== undefined
+              width: parent.width
+              icon: "󰁨"
+              label: service.busy && service.phase === "export" ? "Exporting…" : "Export this calibration"
+              description: "Saves a file named after " + String((service.status.hardware || {}).label || "this machine")
+                + " to your Downloads folder"
+              enabled: !service.busy
+              onClicked: service.exportProfile()
+            }
+            Repeater {
+              model: service.status.sharedProfiles || []
+              ActionRow {
+                width: parent.width
+                icon: "󰓦"
+                label: modelData.valid === true
+                  ? (service.busy && service.phase === "import" ? "Loading…"
+                     : "Load: " + String(modelData.hardware || modelData.name || modelData.file))
+                  : String(modelData.file)
+                description: root.sharedDescription(modelData)
+                enabled: !service.busy && modelData.valid === true
+                onClicked: service.importProfile(modelData.file)
+              }
+            }
+            Text {
+              textFormat: Text.PlainText
+              visible: !(service.status.sharedProfiles && service.status.sharedProfiles.length > 0)
+              width: parent.width
+              text: "No shared calibration files in your Downloads folder yet."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            PanelSeparator { foreground: root.foreground }
+            PanelSeparator { foreground: root.foreground }
             PanelSectionHeader { text: "ACTIONS"; foreground: root.foreground; fontFamily: root.fontFamily }
 
             Column {
@@ -1643,6 +1728,17 @@ Panel {
                 model: root.measurementRows()
                 DetailRow { width: parent.width; key: modelData.key; value: modelData.value }
               }
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              visible: root.importedNote() !== ""
+              width: parent.width
+              text: root.importedNote()
+              color: root.importedMismatch() ? (bar ? bar.urgent : Color.urgent) : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
 
             Column {

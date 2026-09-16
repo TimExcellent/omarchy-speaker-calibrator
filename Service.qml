@@ -37,6 +37,8 @@ Item {
       : operation === "refine" ? "Improving from the last check…"
       : operation === "deepbass" ? "Switching deep bass…"
       : operation === "loudness" ? "Switching loudness compensation…"
+      : operation === "export" ? "Exporting the calibration…"
+      : operation === "import" ? "Loading the shared calibration…"
       : operation === "refit" ? "Applying…" : "Working…"
     _stdout = ""
     _stderr = ""
@@ -161,6 +163,10 @@ Item {
     start("refit", arguments)
   }
   function install() { start("install", ["install-proposal"]) }
+  // Hand the calibration that is playing to someone, or take theirs in.  The
+  // name is one the helper listed from the Downloads folder; it checks it again.
+  function exportProfile() { start("export", ["export-json"]) }
+  function importProfile(name) { start("import", ["import-json", "--file", String(name)]) }
   function disable() { start("disable", ["disable"]) }
   function compare() { start("compare", ["compare-toggle"]) }
   function bypass() { start("bypass", ["bypass-toggle"]) }
@@ -340,6 +346,15 @@ Item {
           root.status = Object.assign({}, root.status, { enabled: true, profile: installed, bypass: false })
           root.message = "Installed and playing: " + root.optionsLabel(installed)
             + (installed.activation === "restart" ? " · tuning restarted" : " · switched live")
+          Qt.callLater(root.refreshStatus)
+        } else if (root.phase === "export") {
+          var exported = JSON.parse(raw)
+          root.message = exported.message || "Exported"
+          Qt.callLater(root.refreshStatus)
+        } else if (root.phase === "import") {
+          var loaded = JSON.parse(raw)
+          root.proposal = loaded.proposal || null
+          root.message = loaded.message || "Loaded"
           Qt.callLater(root.refreshStatus)
         } else if (root.phase === "compare") {
           var compare = JSON.parse(raw)

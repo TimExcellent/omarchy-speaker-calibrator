@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+import stat
 import subprocess
 import sys
 import unittest
@@ -1666,6 +1667,158 @@ class PinnedBassEnhancerTests(unittest.TestCase):
         self.assertEqual(command.split()[0], "/usr/bin/bash")
         self.assertTrue(command.endswith("/bass-enhancer/install.sh"), command)
         self.assertTrue((self.root / "bass-enhancer" / "install.sh").exists())
+
+
+class SharedCalibrationTests(unittest.TestCase):
+    """Exporting a calibration and loading one that somebody shared."""
+
+    OURS = {"sys_vendor": "SLIMBOOK", "product_name": "Executive", "product_version": "",
+            "product_sku": "EXE14", "board_name": "EXE14", "label": "SLIMBOOK Executive"}
+
+    def profile(self, **changes):
+        base = {
+            "schema_version": 5, "plugin_version": "1.1.0", "created_at": "2026-09-16T10:00:00+00:00",
+            "speaker": {"name": "alsa_output.pci-test.analog-stereo", "description": "Built-in Audio"},
+            "microphone": {"name": "alsa_input.usb-test", "description": "Usb Microphone", "channel": 0,
+                           "internal": False, "calibration_file": "/home/someone/mic.txt"},
+            "voicing": "neutral", "loudness": "matched", "bass": "full", "deep_bass": "on",
+            "loudness_compensation": "on",
+            "quality": {"accepted": True, "verdict": "pass", "warnings": [], "guidance": []},
+            "fit": {"filter_count": 2, "input_gain_linear": 0.8, "makeup_db": 2.0,
+                    "filters": [{"type": "peaking", "frequency_hz": 600.0, "q": 2.6, "gain_db": -8.5},
+                                {"type": "peaking", "frequency_hz": 2500.0, "q": 1.0, "gain_db": -6.0}],
+                    "highpass": {"frequency_hz": 190.0, "q": 0.707, "stages": 1},
+                    "bass_shelf": {"frequency_hz": 200.0, "q": 0.707, "gain_db": 3.0}},
+        }
+        base.update(changes)
+        return base
+
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        root = Path(self.folder.name)
+        self.downloads = root / "Downloads"; self.downloads.mkdir()
+        self.data = root / "data"; self.data.mkdir(mode=0o700)
+        self.patches = [
+            mock.patch.object(speaker_calibrate, "DATA", self.data),
+            mock.patch.object(speaker_calibrate, "PROFILE", self.data / "active-profile.json"),
+            mock.patch.object(speaker_calibrate, "PROPOSAL", self.data / "proposed-profile.json"),
+            mock.patch.object(speaker_calibrate, "share_directory", lambda: self.downloads),
+            mock.patch.object(speaker_calibrate, "hardware_id", lambda: dict(self.OURS)),
+            mock.patch.object(speaker_calibrate, "pactl_json",
+                              lambda kind: [{"name": "alsa_output.pci-test.analog-stereo", "description": "Built-in Audio"}]),
+            mock.patch.object(speaker_calibrate, "plugin_version", lambda: "1.1.0"),
+        ]
+        for patch in self.patches:
+            patch.start()
+        self.addCleanup(self.folder.cleanup)
+        for patch in self.patches:
+            self.addCleanup(patch.stop)
+
+    def install_active(self, profile=None):
+        (self.data / "active-profile.json").write_text(json.dumps(profile or self.profile()))
+
+    def test_export_names_the_machine_and_carries_no_paths(self):
+        self.install_active()
+        result = speaker_calibrate.export_profile()
+        path = self.downloads / result["file"]
+        self.assertTrue(path.exists())
+        self.assertEqual(path.name, "slimbook-executive-external-mic-2026-09-16.speaker-calibration.json")
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+        # The Downloads folder itself is left as it was.
+        self.assertEqual(stat.S_IMODE(self.downloads.stat().st_mode), 0o755)
+        payload = json.loads(path.read_text())
+        self.assertEqual(payload["format"], speaker_calibrate.SHARE_FORMAT)
+        self.assertEqual(payload["name"], "SLIMBOOK Executive · external mic · 2026-09-16")
+        self.assertEqual(payload["hardware"]["product_sku"], "EXE14")
+        self.assertEqual(payload["hardware"]["speaker"], "alsa_output.pci-test.analog-stereo")
+        self.assertIs(payload["profile"]["microphone"]["calibration_file"], True)
+        self.assertNotIn("/home/", path.read_text())
+
+    def test_a_shared_file_is_listed_loaded_and_matched(self):
+        self.install_active()
+        exported = speaker_calibrate.export_profile()
+        listed = speaker_calibrate.shared_profiles()
+        self.assertEqual([entry["file"] for entry in listed], [exported["file"]])
+        self.assertTrue(listed[0]["valid"])
+        self.assertEqual(listed[0]["matches"], {"machine": True, "speakers": True})
+        result = speaker_calibrate.import_profile(name=exported["file"])
+        self.assertIsNone(result["warning"])
+        proposal = json.loads((self.data / "proposed-profile.json").read_text())
+        self.assertEqual(proposal["imported"]["file"], exported["file"])
+        self.assertEqual(proposal["imported"]["matches"], {"machine": True, "speakers": True})
+        self.assertEqual(proposal["speaker"]["name"], "alsa_output.pci-test.analog-stereo")
+        self.assertTrue(proposal["quality"]["accepted"])
+
+    def test_other_hardware_is_warned_about_and_pointed_at_these_speakers(self):
+        self.install_active()
+        exported = speaker_calibrate.export_profile()
+        theirs = {**self.OURS, "sys_vendor": "Dell Inc.", "product_name": "XPS 14", "product_sku": "0DB9",
+                  "label": "Dell Inc. XPS 14"}
+        with mock.patch.object(speaker_calibrate, "hardware_id", lambda: theirs), \
+             mock.patch.object(speaker_calibrate, "pactl_json",
+                               lambda kind: [{"name": "alsa_output.pci-xps.analog-stereo", "description": "XPS speakers"}]):
+            (self.data / "active-profile.json").unlink()
+            listed = speaker_calibrate.shared_profiles()
+            self.assertEqual(listed[0]["matches"], {"machine": False, "speakers": False})
+            result = speaker_calibrate.import_profile(name=exported["file"])
+        self.assertIn("made on SLIMBOOK Executive; this is Dell Inc. XPS 14", result["warning"])
+        self.assertEqual(result["proposal"]["speaker"]["name"], "alsa_output.pci-xps.analog-stereo")
+        self.assertFalse(result["proposal"]["imported"]["matches"]["machine"])
+        self.assertEqual(result["proposal"]["deep_bass"], "off")
+
+    def test_hardware_matching_prefers_the_sku(self):
+        matches = speaker_calibrate.hardware_matches
+        self.assertTrue(matches({"product_sku": "A", "product_name": "X"}, {"product_sku": "A", "product_name": "Y"}))
+        self.assertFalse(matches({"product_sku": "A", "product_name": "X"}, {"product_sku": "B", "product_name": "X"}))
+        self.assertTrue(matches({"sys_vendor": "Slimbook", "product_name": "Executive"},
+                                {"sys_vendor": "SLIMBOOK", "product_name": "executive", "product_sku": "Z"}))
+        self.assertFalse(matches({"sys_vendor": "Slimbook"}, {"sys_vendor": "Slimbook"}))
+
+    def write_shared(self, name, payload):
+        (self.downloads / name).write_text(json.dumps(payload))
+
+    def shared(self, **fit_changes):
+        profile = self.profile()
+        profile["fit"].update(fit_changes)
+        return {"format": speaker_calibrate.SHARE_FORMAT, "name": "x", "hardware": dict(self.OURS), "profile": profile}
+
+    def test_values_outside_the_protective_envelope_are_refused(self):
+        valid = speaker_calibrate.valid_shared_payload
+        valid(self.shared())
+        for changes, reason in (
+            ({"filters": [{"type": "peaking", "frequency_hz": 600.0, "q": 1.0, "gain_db": 30.0}]}, "gain"),
+            ({"filters": [{"type": "peaking", "frequency_hz": 50000.0, "q": 1.0, "gain_db": -3.0}]}, "frequency"),
+            ({"filters": [{"type": "allpass", "frequency_hz": 600.0, "q": 1.0, "gain_db": -3.0}]}, "unknown type"),
+            ({"filters": [{"type": "peaking", "frequency_hz": 600.0, "q": 1.0, "gain_db": -3.0}] * 13}, "filters are expected"),
+            ({"highpass": {"frequency_hz": 5000.0}}, "high-pass"),
+            ({"channel_trim": {"left_db": 12.0, "right_db": 0.0}}, "trim"),
+            ({"input_gain_linear": 9.0}, "input gain"),
+            ({"input_gain_linear": float("nan")}, "not finite"),
+        ):
+            with self.assertRaisesRegex(ValueError, reason, msg=str(changes)):
+                valid(self.shared(**changes))
+        rejected = self.shared(); rejected["profile"]["quality"]["accepted"] = False
+        with self.assertRaisesRegex(ValueError, "quality"):
+            valid(rejected)
+        with self.assertRaisesRegex(ValueError, "not a shared"):
+            valid({"format": "something-else/1"})
+
+    def test_bad_names_symlinks_and_oversized_files_are_refused(self):
+        with self.assertRaises(SystemExit):
+            speaker_calibrate.import_profile(name="../etc/passwd.speaker-calibration.json")
+        with self.assertRaises(SystemExit):
+            speaker_calibrate.import_profile(name="nope")
+        victim = Path(self.folder.name) / "victim.json"; victim.write_text(json.dumps(self.shared()))
+        (self.downloads / "link.speaker-calibration.json").symlink_to(victim)
+        with self.assertRaises(SystemExit):
+            speaker_calibrate.import_profile(name="link.speaker-calibration.json")
+        self.assertEqual(speaker_calibrate.shared_profiles(), [])
+        self.write_shared("big.speaker-calibration.json", self.shared())
+        with mock.patch.object(speaker_calibrate, "SHARE_LIMIT_BYTES", 100):
+            with self.assertRaises(SystemExit):
+                speaker_calibrate.import_profile(name="big.speaker-calibration.json")
+            listed = speaker_calibrate.shared_profiles()
+        self.assertEqual([entry["valid"] for entry in listed], [False])
 
 
 if __name__ == "__main__":

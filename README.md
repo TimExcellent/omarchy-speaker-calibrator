@@ -242,10 +242,41 @@ sound worse than it started.
 - Existing tuning files are backed up before replacement, and failed or
   clipped measurements are saved for diagnosis but cannot be installed.
 
+## Sharing a calibration
+
+A calibration is specific to one model's speakers, so it can be handed to
+someone with the same machine. Under Advanced, **Export this calibration**
+writes the calibration that is playing to your Downloads folder as one file,
+named after the machine, the microphone and the date, for example
+`slimbook-executive-external-mic-2026-09-16.speaker-calibration.json`. The
+file carries the machine it was made on (the vendor, product, SKU and board
+from the firmware, the same fields Omarchy keys its own speaker tunings on)
+and the speaker device, and nothing about you: no user name, no paths.
+
+A shared file dropped into your Downloads folder appears in the same section.
+**Load** makes it the last measurement, ready to install, exactly like a fresh
+measurement: **Install last measurement** applies it, your own calibration is
+kept, and **Switch profile** brings it back. When the file was made on
+different hardware the panel says so before you install it, because speakers
+differ between models and a calibration for another laptop may sound wrong.
+When the exporting machine's speaker device does not exist here, the
+calibration is pointed at this machine's speakers instead.
+
+Every value a shared file could feed into the filter chain is checked against
+the same limits the optimizer works under before anything is loaded: no cut
+deeper than 18 dB, no boost above 6 dB, no high-pass above 400 Hz, no trim
+beyond 6 dB, at most twelve filters, and a measurement that passed its own
+quality checks. A file outside those limits is refused, not repaired. From a
+terminal, `speaker-calibrate.py export-json` and
+`speaker-calibrate.py import-json --path FILE` do the same.
+
 ## What leaves your machine
 
 Nothing. There is no API, no telemetry, no update check and no account. The
 plugin never opens a socket.
+
+An exported calibration is a file in your Downloads folder and goes nowhere
+unless you send it; loading one reads a file from that folder and nothing else.
 
 The one exception is the optional `bankstown` package, and only if you press
 the button that installs it: `makepkg` then fetches the pinned upstream commit

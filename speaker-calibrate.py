@@ -5,11 +5,14 @@ import argparse
 import contextlib
 import datetime as dt
 import json
+import math
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -2172,6 +2175,360 @@ def archived_microphones():
     return found
 
 
+# ---- sharing a calibration ---------------------------------------------------
+# A calibration is specific to one model's speakers.  An export therefore
+# carries the machine it was made on, in the DMI fields Omarchy's own speaker
+# tunings are keyed on, and the speaker device; a load says so plainly when
+# they differ from this machine's, and never silently.
+SHARE_FORMAT = "omarchy-speaker-calibration/1"
+SHARE_SUFFIX = ".speaker-calibration.json"
+SHARE_LIMIT_BYTES = 1 << 20
+SHARE_LIST_LIMIT = 12
+SHARE_SCAN_LIMIT = 5000
+SHARE_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,150}")
+DMI_FIELDS = ("sys_vendor", "product_name", "product_version", "product_sku", "board_name")
+DMI_PLACEHOLDERS = {
+    "", "to be filled by o.e.m.", "default string", "system product name",
+    "system version", "system manufacturer", "not specified", "not applicable",
+    "none", "n/a", "unknown", "type1productconfigid", "0123456789",
+}
+# The envelope every shared filter has to fit in, whatever the file says about
+# its own limits: the protection the optimizer works under, with a margin.
+SHARE_FILTER_LIMIT = 12
+SHARE_GAIN_DB = (-18.0, 6.0)
+SHARE_FREQUENCY_HZ = (20.0, 20000.0)
+SHARE_Q = (0.1, 20.0)
+SHARE_HIGHPASS_HZ = (10.0, 400.0)
+SHARE_HIGHPASS_Q = (0.3, 2.0)
+SHARE_TRIM_DB = 6.0
+SHARE_INPUT_GAIN = (0.05, 2.0)
+SHARE_ARRAY_LIMIT = 4096
+SHARE_TEXT_LIMIT = 400
+SHARE_DEPTH_LIMIT = 10
+SHARE_KEYS_LIMIT = 200
+SHARE_FILTER_TYPES = ("peaking", "lowshelf", "highshelf")
+
+
+def share_directory():
+    """Where exports go and where shared files are looked for: Downloads."""
+    for candidate in (os.environ.get("XDG_DOWNLOAD_DIR"), str(Path.home() / "Downloads")):
+        if candidate and Path(candidate).is_dir():
+            return Path(candidate)
+    return DATA / "shared"
+
+
+def dmi_value(field):
+    try:
+        raw = read_text_bounded(Path("/sys/class/dmi/id") / field, 4096,
+                                errors="ignore", allow_root=True)
+    except (OSError, UnsafeFile):
+        return ""
+    value = short_label((raw or "").strip()) or ""
+    return "" if value.lower() in DMI_PLACEHOLDERS else value
+
+
+def hardware_id():
+    """This machine, as the firmware describes it."""
+    info = {field: dmi_value(field) for field in DMI_FIELDS}
+    label = " ".join(part for part in (info["sys_vendor"], info["product_name"]) if part)
+    return {**info, "label": label or "this machine"}
+
+
+def hardware_matches(theirs, ours):
+    """Same model: the SKU when both sides have one, else vendor and product."""
+    theirs, ours = theirs or {}, ours or {}
+    if theirs.get("product_sku") and ours.get("product_sku"):
+        return theirs["product_sku"] == ours["product_sku"]
+    if not theirs.get("product_name"):
+        return False
+    key = lambda info: ((info.get("sys_vendor") or "").lower(), (info.get("product_name") or "").lower())
+    return key(theirs) == key(ours)
+
+
+def write_shared(name, text):
+    """Publish a shareable file in Downloads without touching the folder itself.
+
+    ``write_atomic`` tightens its directory to 0700, which is right for the
+    plugin's own state and wrong for a folder the user shares with a browser,
+    so this does the same exclusive-temporary-then-rename dance by hand and
+    leaves the folder's mode alone.  The file is 0644: it is meant to be
+    handed around.
+    """
+    directory = share_directory()
+    if directory == DATA / "shared":
+        destination = directory / name
+        write_atomic(destination, text, mode=0o644)
+        return destination
+    dfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(dfd)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            raise UnsafeFile(f"refusing to write into {directory}: not a directory of ours")
+        temporary = f".{name}.{secrets.token_hex(8)}.tmp"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o644, dir_fd=dfd)
+        try:
+            os.fchmod(fd, 0o644)
+            view = memoryview(text.encode("utf-8"))
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+            os.rename(temporary, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+            os.fsync(dfd)
+        except BaseException:
+            try:
+                os.unlink(temporary, dir_fd=dfd)
+            except OSError:
+                pass
+            raise
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dfd)
+    return directory / name
+
+
+def export_profile():
+    """The calibration that is playing, as one file to hand to someone."""
+    profile = load_profile(PROFILE)
+    if profile is None:
+        raise SystemExit("No calibration is installed, so there is nothing to export.")
+    hardware = hardware_id()
+    kind = MICROPHONE_KIND_LABELS[microphone_kind(profile)]
+    day = str(profile.get("created_at", ""))[:10] or dt.date.today().isoformat()
+    name = f"{hardware['label']} · {kind} · {day}"
+    shared = dict(profile)
+    for key in ("activation", "installed", "imported"):
+        shared.pop(key, None)
+    mic = dict(shared.get("microphone") or {})
+    # The correction file is a path on the exporting machine; only whether
+    # there was one travels.
+    mic["calibration_file"] = bool(mic.get("calibration_file"))
+    shared["microphone"] = mic
+    speaker = profile.get("speaker") or {}
+    payload = {
+        "format": SHARE_FORMAT,
+        "name": name,
+        "exported_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "plugin_version": plugin_version(),
+        "hardware": {**hardware, "speaker": speaker.get("name"),
+                     "speaker_description": short_label(speaker.get("description"))},
+        "profile": shared,
+    }
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{hardware['label']} {kind} {day}".lower()).strip("-")[:80]
+    path = write_shared(f"{slug or 'calibration'}{SHARE_SUFFIX}", json.dumps(payload, indent=1) + "\n")
+    return {
+        "file": path.name, "directory": str(path.parent), "name": name, "hardware": hardware,
+        "message": f"Saved {path.name} in {path.parent}. Hand that file to someone with the same "
+                   "machine; dropped into their Downloads folder, it shows up in their panel.",
+    }
+
+
+def _finite(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _within(value, bounds):
+    return _finite(value) and bounds[0] <= float(value) <= bounds[1]
+
+
+def bounded_copy(value, depth=0):
+    """A copy of a document with every string, number, list and dict bounded."""
+    if depth > SHARE_DEPTH_LIMIT:
+        raise ValueError("nested too deeply")
+    if isinstance(value, dict):
+        if len(value) > SHARE_KEYS_LIMIT:
+            raise ValueError("too many keys")
+        return {str(key)[:64]: bounded_copy(item, depth + 1)
+                for key, item in value.items() if isinstance(key, str)}
+    if isinstance(value, list):
+        if len(value) > SHARE_ARRAY_LIMIT:
+            raise ValueError("an array is too long")
+        return [bounded_copy(item, depth + 1) for item in value]
+    if isinstance(value, str):
+        return short_label(value, SHARE_TEXT_LIMIT) or ""
+    if value is None or isinstance(value, bool) or _finite(value):
+        return value
+    raise ValueError("a number is not finite")
+
+
+def _check_section(section, what, gain_bounds=SHARE_GAIN_DB):
+    if not isinstance(section, dict):
+        raise ValueError(f"{what} is not a filter")
+    if not _within(section.get("frequency_hz"), SHARE_FREQUENCY_HZ):
+        raise ValueError(f"{what} has a frequency outside {SHARE_FREQUENCY_HZ}")
+    if not _within(section.get("q", 0.707), SHARE_Q):
+        raise ValueError(f"{what} has a Q outside {SHARE_Q}")
+    if not _within(section.get("gain_db", 0.0), gain_bounds):
+        raise ValueError(f"{what} has a gain outside {gain_bounds} dB")
+
+
+def valid_shared_payload(payload):
+    """The document a shared file must be, or ValueError saying why not.
+
+    Everything is bounded first, then every value that reaches the filter
+    chain is held to the same envelope the optimizer works in.  A file that
+    fails is refused, not repaired: a calibration with one value out of range
+    is not one to install with that value clamped.
+    """
+    if not isinstance(payload, dict) or payload.get("format") != SHARE_FORMAT:
+        raise ValueError("not a shared calibration file")
+    payload = bounded_copy(payload)
+    profile = payload.get("profile")
+    if not isinstance(profile, dict):
+        raise ValueError("no calibration inside")
+    fit = profile.get("fit")
+    if not isinstance(fit, dict):
+        raise ValueError("no filter set")
+    filters = fit.get("filters")
+    if not isinstance(filters, list) or not 1 <= len(filters) <= SHARE_FILTER_LIMIT:
+        raise ValueError(f"between 1 and {SHARE_FILTER_LIMIT} filters are expected")
+    for index, item in enumerate(filters, 1):
+        if not isinstance(item, dict) or item.get("type", "peaking") not in SHARE_FILTER_TYPES:
+            raise ValueError(f"filter {index} has an unknown type")
+        _check_section(item, f"filter {index}")
+    for key in ("bass_shelf", "low_shelf", "high_shelf"):
+        if fit.get(key):
+            _check_section(fit[key], key)
+    highpass = fit.get("highpass")
+    if highpass is not None:
+        if not isinstance(highpass, dict) or not _within(highpass.get("frequency_hz"), SHARE_HIGHPASS_HZ):
+            raise ValueError(f"the high-pass corner is outside {SHARE_HIGHPASS_HZ} Hz")
+        if not _within(highpass.get("q", 0.707), SHARE_HIGHPASS_Q):
+            raise ValueError("the high-pass Q is out of range")
+        if highpass.get("stages", 1) not in (1, 2):
+            raise ValueError("the high-pass must have one or two stages")
+    if "highpass_hz" in fit and not _within(fit["highpass_hz"], SHARE_HIGHPASS_HZ):
+        raise ValueError(f"the high-pass corner is outside {SHARE_HIGHPASS_HZ} Hz")
+    trim = fit.get("channel_trim")
+    if trim:
+        if not isinstance(trim, dict) or not all(
+                _within(trim.get(side, 0.0), (-SHARE_TRIM_DB, SHARE_TRIM_DB)) for side in ("left_db", "right_db")):
+            raise ValueError(f"channel trim beyond ±{SHARE_TRIM_DB:.0f} dB")
+    if not _within(fit.get("input_gain_linear"), SHARE_INPUT_GAIN):
+        raise ValueError("the input gain is missing or out of range")
+    quality = profile.get("quality")
+    if not isinstance(quality, dict) or quality.get("accepted") is not True:
+        raise ValueError("the measurement did not pass its own quality checks")
+    quality["verdict"] = safe_verdict(quality.get("verdict"))
+    for key, labels, default in (("voicing", VOICING_LABELS, "neutral"), ("bass", BASS_LABELS, "normal"),
+                                 ("loudness", LOUDNESS_LABELS, "protected")):
+        if profile.get(key) not in labels:
+            profile[key] = default
+    mic = profile.get("microphone")
+    if not isinstance(mic, dict):
+        raise ValueError("no microphone record")
+    mic["internal"] = bool(mic.get("internal"))
+    mic["calibration_file"] = None
+    return payload
+
+
+def local_speaker():
+    """The speaker output a loaded calibration is applied to here."""
+    current = load_profile(PROFILE)
+    if current and (current.get("speaker") or {}).get("name"):
+        return current["speaker"]
+    sinks = [item for item in pactl_json("sinks")
+             if str(item.get("name", "")).startswith("alsa_output.") and item.get("name") != VIRTUAL_SINK]
+    if not sinks:
+        raise SystemExit("No speaker output was found on this machine.")
+    return {"name": sinks[0]["name"], "description": label(sinks[0])}
+
+
+def shared_summary(path, ours, sinks):
+    """One row for the panel: what the file is and whether it fits this machine."""
+    try:
+        raw = read_text_bounded(path, SHARE_LIMIT_BYTES, missing_ok=False)
+        payload = valid_shared_payload(json.loads(raw or ""))
+    except (OSError, UnsafeFile, ValueError) as error:
+        return {"file": path.name, "valid": False,
+                "reason": short_label(str(error), SHARE_TEXT_LIMIT) or "cannot be read"}
+    theirs = payload.get("hardware") or {}
+    profile = payload["profile"]
+    return {
+        "file": path.name, "valid": True,
+        "name": short_label(payload.get("name")) or path.name,
+        "hardware": short_label(theirs.get("label")) or "unknown hardware",
+        "created_at": short_label(profile.get("created_at"), 40),
+        "microphone": MICROPHONE_KIND_LABELS[microphone_kind(profile)],
+        "matches": {"machine": hardware_matches(theirs, ours), "speakers": theirs.get("speaker") in sinks},
+    }
+
+
+def shared_profiles():
+    """Shared calibrations sitting in Downloads, newest first, a dozen at most."""
+    directory = share_directory()
+    candidates = []
+    try:
+        with os.scandir(directory) as entries:
+            for count, entry in enumerate(entries):
+                if count >= SHARE_SCAN_LIMIT:
+                    break
+                if entry.name.endswith(SHARE_SUFFIX) and entry.is_file(follow_symlinks=False):
+                    candidates.append((entry.stat(follow_symlinks=False).st_mtime, entry.name))
+    except OSError:
+        return []
+    candidates.sort(reverse=True)
+    ours = hardware_id()
+    sinks = {item.get("name") for item in pactl_json("sinks")}
+    return [shared_summary(directory / name, ours, sinks) for _, name in candidates[:SHARE_LIST_LIMIT]]
+
+
+def import_profile(name=None, path=None):
+    """Make a shared calibration the last measurement, ready to install.
+
+    It goes through the same door as a fresh measurement: it becomes the
+    proposal, and Install applies it while the previous profile is kept for
+    comparison.  When the hardware differs from this machine the result says
+    so, and when the exporting machine's speaker device does not exist here
+    the calibration is pointed at this machine's speakers instead.
+    """
+    if path:
+        source = Path(path)
+    else:
+        if (not name or "/" in name or name in (".", "..") or not name.endswith(SHARE_SUFFIX)
+                or not SHARE_NAME_PATTERN.fullmatch(name)):
+            raise SystemExit("That is not the name of a shared calibration file.")
+        source = share_directory() / name
+    try:
+        raw = read_text_bounded(source, SHARE_LIMIT_BYTES, missing_ok=False)
+        payload = valid_shared_payload(json.loads(raw or ""))
+    except FileNotFoundError:
+        raise SystemExit(f"{source.name} is not there any more.")
+    except (OSError, UnsafeFile) as error:
+        raise SystemExit(f"{source.name} cannot be read: {error}")
+    except ValueError as error:
+        raise SystemExit(f"{source.name} cannot be loaded: {error}.")
+    ours = hardware_id()
+    theirs = payload.get("hardware") or {}
+    sinks = {item.get("name") for item in pactl_json("sinks")}
+    matches = {"machine": hardware_matches(theirs, ours), "speakers": theirs.get("speaker") in sinks}
+    profile = payload["profile"]
+    if not matches["speakers"]:
+        profile["speaker"] = local_speaker()
+    # The switches are this machine's, not the exporter's.
+    current = load_profile(PROFILE) or {}
+    profile["deep_bass"] = current.get("deep_bass", "off")
+    profile["loudness_compensation"] = current.get("loudness_compensation", "off")
+    profile["imported"] = {
+        "file": source.name, "name": short_label(payload.get("name")),
+        "exported_at": short_label(payload.get("exported_at"), 40),
+        "hardware": {key: short_label(theirs.get(key)) for key in DMI_FIELDS + ("label", "speaker_description")},
+        "this_machine": ours["label"], "matches": matches,
+    }
+    write_atomic(PROPOSAL, json.dumps(profile, indent=2) + "\n")
+    warning = None if matches["machine"] else (
+        f"It was made on {theirs.get('label') or 'another machine'}; this is {ours['label']}. "
+        "Speakers differ between models, so it may sound wrong here."
+    )
+    return {
+        "proposal": profile, "matches": matches, "warning": warning,
+        "message": f"Loaded {profile['imported']['name'] or source.name}. Press Install last "
+                   "measurement to hear it; Switch profile brings your own back."
+                   + (f" {warning}" if warning else ""),
+    }
+
+
 def cached_status():
     """The last status this plugin wrote, for drawing the panel immediately.
 
@@ -2210,6 +2567,8 @@ def status_payload():
             "loudnessCompensation": (profile or {}).get("loudness_compensation", "off"),
             "loudnessTracker": "running" if loudness_running() else "stopped",
             "microphones": archived_microphones(),
+            "hardware": hardware_id(),
+            "sharedProfiles": shared_profiles(),
             "unusableMicrophones": [short_label(name) for name in unusable_microphones()],
             "measurementSupport": measurement_support()}
     try:
@@ -2382,6 +2741,10 @@ def main():
                  "install-measurement-support", "loudness-toggle"):
         sub.add_parser(name)
     sub.add_parser("verify-json")
+    sub.add_parser("export-json")
+    imported = sub.add_parser("import-json")
+    imported.add_argument("--file", help="a shared file in the Downloads folder, by name")
+    imported.add_argument("--path", help="a shared file anywhere, for use from a terminal")
     refine = sub.add_parser("refine-json")
     refine.add_argument("--install", action="store_true",
                         help="install and play the improved profile")
@@ -2436,6 +2799,10 @@ def main():
         print(json.dumps(bypass_toggle()))
     elif command == "verify-json":
         print(json.dumps(verify_calibration()))
+    elif command == "export-json":
+        print(json.dumps(export_profile()))
+    elif command == "import-json":
+        print(json.dumps(import_profile(name=args.file, path=args.path)))
     elif command == "deep-bass-toggle":
         print(json.dumps(deep_bass_toggle()))
     elif command == "loudness-toggle":
